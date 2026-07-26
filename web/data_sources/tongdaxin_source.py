@@ -29,6 +29,7 @@ _CAT = {
 }
 
 _PRESETS = ["600519", "000001", "300750", "601318", "000858", "sh000001", "sz399006"]
+_PAGE_SIZE = 800
 
 
 def _parse_market(code: str) -> tuple[int, str]:
@@ -138,15 +139,79 @@ class TongdaxinSource(DataSource):
                 pass
         self._api = None
 
-    def _fetch_raw(self, cat: int, market: int, code: str, want: int, is_index: bool):
+    def _fetch_raw(
+        self,
+        cat: int,
+        market: int,
+        code: str,
+        start: int,
+        count: int,
+        is_index: bool,
+    ):
         """指数走 get_index_bars，股票走 get_security_bars。
 
         通达信协议规定指数必须用 get_index_bars；若对指数用 get_security_bars，
         返回数据从第 2 条起 datetime 会损坏（年份变成 7772、228200 等乱码）。
         """
         if is_index:
-            return self._api.get_index_bars(cat, market, code, 0, want)
-        return self._api.get_security_bars(cat, market, code, 0, want)
+            return self._api.get_index_bars(cat, market, code, start, count)
+        return self._api.get_security_bars(cat, market, code, start, count)
+
+    def _fetch_page(
+        self,
+        cat: int,
+        market: int,
+        code: str,
+        start: int,
+        count: int,
+        is_index: bool,
+    ):
+        """抓取一页；连接失效时重连并只重试当前页一次。"""
+        try:
+            return self._fetch_raw(
+                cat, market, code, start, count, is_index
+            )
+        except Exception:
+            self.disconnect()
+            self.connect()
+            return self._fetch_raw(
+                cat, market, code, start, count, is_index
+            )
+
+    def _fetch_paged(
+        self,
+        cat: int,
+        market: int,
+        code: str,
+        want: int,
+        is_index: bool,
+    ) -> list:
+        """按通达信每页 800 根的限制向历史方向分页。"""
+        raw: list = []
+        seen_datetimes: set[str] = set()
+        start = 0
+        while len(raw) < want:
+            count = min(_PAGE_SIZE, want - len(raw))
+            page = self._fetch_page(
+                cat, market, code, start, count, is_index
+            )
+            if not page:
+                break
+            received = len(page)
+            added = 0
+            for row in page:
+                key = str(row.get("datetime", ""))
+                if key in seen_datetimes:
+                    continue
+                seen_datetimes.add(key)
+                raw.append(row)
+                added += 1
+            start += received
+            if received < count:
+                break
+            if added == 0:
+                break
+        return raw
 
     def fetch_bars(
         self, symbol: str, timeframe: str, n: int, drop_forming: bool = True
@@ -158,20 +223,18 @@ class TongdaxinSource(DataSource):
         """
         if timeframe not in _CAT:
             raise DataSourceUnavailable(f"通达信不支持周期 {timeframe}")
+        if n <= 0:
+            return []
         market, code = _parse_market(symbol)
         cat = _CAT[timeframe]
-        want = min(max(n + 2, 20), 800)  # 单次上限 800
+        want = max(n + 2, 20)
         is_index = _is_index(market, code)
 
         with self._lock:
             self.connect()
-            try:
-                raw = self._fetch_raw(cat, market, code, want, is_index)
-            except Exception:
-                # 连接可能失效，重连一次
-                self._api = None
-                self.connect()
-                raw = self._fetch_raw(cat, market, code, want, is_index)
+            raw = self._fetch_paged(
+                cat, market, code, want, is_index
+            )
 
         if not raw:
             raise DataSourceUnavailable(
@@ -185,19 +248,20 @@ class TongdaxinSource(DataSource):
                 f"（如 sh000001、sz399006），股票代码请确认无误。"
             )
 
-        bars: list[Bar] = []
+        bars_by_ts: dict[int, Bar] = {}
         for r in raw:
-            bars.append(
-                Bar(
-                    ts=_parse_dt(r.get("datetime", "")),
-                    open=float(r["open"]),
-                    high=float(r["high"]),
-                    low=float(r["low"]),
-                    close=float(r["close"]),
-                    volume=float(r.get("vol", 0.0) or 0.0),  # 单位：手（1手=100股）
-                )
+            ts = _parse_dt(r.get("datetime", ""))
+            if ts <= 0:
+                continue
+            bars_by_ts[ts] = Bar(
+                ts=ts,
+                open=float(r["open"]),
+                high=float(r["high"]),
+                low=float(r["low"]),
+                close=float(r["close"]),
+                volume=float(r.get("vol", 0.0) or 0.0),  # 单位：手（1手=100股）
             )
-        bars.sort(key=lambda b: b.ts)  # 保证升序
+        bars = sorted(bars_by_ts.values(), key=lambda b: b.ts)
         # 剔除尚未收盘的 bar：通达信 datetime 为收盘时刻（北京时间），_parse_dt
         # 返回的 ts 即收盘时刻的 UTC 秒；ts > now 说明该 bar 仍在形成中。
         # （不再盲删最后一条，以免盘后把当天已收盘 bar 误删，导致 last_bar 滞后一天。）

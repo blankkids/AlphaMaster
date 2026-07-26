@@ -5,10 +5,11 @@ import threading
 
 from web.data_sources.base import DataSource
 
-# 前端下拉可见的数据源（国内期货默认隐藏，如需启用加回列表即可）
+# 前端下拉可见的数据源（其余已实现数据源仍保持隐藏）
 SOURCE_KINDS: tuple[tuple[str, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
+    ("tongdaxin", "通达信"),
 )
 
 _INSTANCES: dict[str, DataSource] = {}
