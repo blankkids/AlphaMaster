@@ -38,6 +38,8 @@ ENV/
 *.swp
 *.swo
 *~
+.playwright-mcp/
+.codegraph/
 
 # Environment variables / secrets
 .env

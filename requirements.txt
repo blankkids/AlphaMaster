@@ -24,6 +24,7 @@ MetaTrader5>=5.0.45
 tushare>=1.2.89
 pytdx>=1.72
 requests>=2.31.0
+websocket-client>=1.6.0
 # TradingView (tvDatafeed) — install via git if the VCS line fails on your network:
 #   python -m pip install git+https://github.com/rongardF/tvdatafeed.git
 tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git

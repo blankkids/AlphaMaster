@@ -112,9 +112,23 @@ python run_web.py --port 8765
 # CLI 训练（自动续训；加 --from-scratch 则重新训练）
 python train_file.py --data-file D:\K线数据\BTCUSDT_H1.parquet
 python train_file.py --data-file D:\K线数据\BTCUSDT_H1.parquet --from-scratch
+
+# 从 TradingView 下载训练数据
+# 六位中国证券代码可自动识别 SSE/SZSE；--all 表示下载可访问的全部历史
+python download_tradingview_klines.py 159170 --timeframe 5m --all
+
+# 指定交易所和日期范围
+python download_tradingview_klines.py AAPL --exchange NASDAQ --timeframe 1h \
+  --start 2024-01-01 --end 2025-12-31
 ```
 
 策略输出默认在 `strategies/best_{symbol}.json`。
+
+TradingView 下载器输出 `{品种}_{周期}.parquet`，可直接在 Web 控制台选择。
+支持周期 `1m/5m/15m/30m/1h/4h/1d/1w/1M`。匿名访问能下载的
+历史深度和品种范围由 TradingView 决定；网络直连受限时，下载器默认尝试
+通过本机 Chrome/Edge 建立浏览器连接。`--all` 默认最多抓取 200,000 根；
+分钟级历史超过该数量时可增大 `--max-bars`。
 
 ---
 
