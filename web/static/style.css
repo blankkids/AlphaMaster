@@ -1792,9 +1792,11 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
 }
 
 .rt-field-wide { flex: 1 1 260px; }
+.rt-field-refresh { min-width: 110px; flex: 0 0 110px; }
 
 .rt-field select,
 .rt-field input[type="text"],
+.rt-field input[type="number"],
 .rt-field input[type="password"] {
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
@@ -1808,9 +1810,11 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
 }
 
 .rt-field input[type="text"],
+.rt-field input[type="number"],
 .rt-field input[type="password"] { font-family: var(--mono); font-size: 0.85rem; }
 .rt-field select:focus,
 .rt-field input[type="text"]:focus,
+.rt-field input[type="number"]:focus,
 .rt-field input[type="password"]:focus { border-color: var(--accent); }
 
 .rt-actions { display: flex; gap: 10px; align-items: flex-end; }

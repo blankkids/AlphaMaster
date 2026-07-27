@@ -87,7 +87,7 @@ class DomesticFuturesSource(DataSource):
     """国内期货实时数据源（tqsdk 天勤量化）。
 
     每次 fetch_bars 建立临时 tqsdk 连接，拉取最新 N 根 K 线后关闭。
-    realtime_manager 的轮询间隔 45-300 秒，1-3 秒的连接开销可接受。
+    realtime_manager 按监控项配置的秒数轮询，刷新过快时连接开销会限制实际频率。
     """
 
     kind = "domestic_futures"

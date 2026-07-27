@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -47,7 +47,12 @@ from web.training_manager import training_manager
 from web.training_time import get_training_time_summary
 from web.training_package import build_training_export_zip, import_training_package
 from web.backtest_manager import backtest_manager
-from web.realtime_manager import realtime_manager
+from web.realtime_manager import (
+    DEFAULT_REFRESH_SECONDS,
+    MAX_REFRESH_SECONDS,
+    MIN_REFRESH_SECONDS,
+    realtime_manager,
+)
 from web.data_sources.factory import list_sources
 from strategy_manager.live_signal import min_exposure
 
@@ -104,6 +109,11 @@ class AddWatchRequest(BaseModel):
     symbol: str
     timeframe: str
     strategy_file: str
+    refresh_seconds: int = Field(
+        default=DEFAULT_REFRESH_SECONDS,
+        ge=MIN_REFRESH_SECONDS,
+        le=MAX_REFRESH_SECONDS,
+    )
 
 
 class RemoveWatchRequest(BaseModel):
@@ -968,7 +978,13 @@ def _startup_realtime() -> None:
 
 @app.get("/api/realtime/sources")
 def api_realtime_sources() -> dict[str, Any]:
-    return {"sources": list_sources(), "min_exposure": min_exposure()}
+    return {
+        "sources": list_sources(),
+        "min_exposure": min_exposure(),
+        "default_refresh_seconds": DEFAULT_REFRESH_SECONDS,
+        "min_refresh_seconds": MIN_REFRESH_SECONDS,
+        "max_refresh_seconds": MAX_REFRESH_SECONDS,
+    }
 
 
 @app.post("/api/realtime/tradingview/probe")
@@ -1025,7 +1041,11 @@ def api_realtime_status() -> dict[str, Any]:
 def api_realtime_watch(req: AddWatchRequest) -> dict[str, Any]:
     try:
         watch = realtime_manager.add_watch(
-            req.source, req.symbol, req.timeframe, req.strategy_file
+            req.source,
+            req.symbol,
+            req.timeframe,
+            req.strategy_file,
+            req.refresh_seconds,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

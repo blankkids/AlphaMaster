@@ -17,7 +17,7 @@ _DEFAULT = {
     # 回测单边成本（单位 %）：手续费 0.02% + 滑点 0.01% ≈ 常见加密货币轻度成本
     "bt_commission_pct": 0.02,
     "bt_slippage_pct": 0.01,
-    # 实时分析监控清单：[{source, symbol, timeframe, strategy_file}, ...]
+    # 实时分析监控清单：[{source, symbol, timeframe, strategy_file, refresh_seconds}, ...]
     "realtime_watches": [],
     # 飞书机器人（信号转折提醒，仅文本）
     "feishu_enabled": False,
@@ -28,6 +28,10 @@ _DEFAULT = {
     "tqsdk_password": "ghhkphs8",
 }
 
+_DEFAULT_REFRESH_SECONDS = 5
+_MIN_REFRESH_SECONDS = 1
+_MAX_REFRESH_SECONDS = 3600
+
 
 def _as_pct(value, default: float) -> float:
     try:
@@ -37,6 +41,16 @@ def _as_pct(value, default: float) -> float:
     if v < 0:
         return default
     return v
+
+
+def _as_refresh_seconds(value) -> int:
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return _DEFAULT_REFRESH_SECONDS
+    if not _MIN_REFRESH_SECONDS <= seconds <= _MAX_REFRESH_SECONDS:
+        return _DEFAULT_REFRESH_SECONDS
+    return seconds
 
 
 def _is_ephemeral_data_path(path: str) -> bool:
@@ -137,7 +151,13 @@ def load_settings() -> dict:
         sf = str(w.get("strategy_file") or "").strip()
         if src and sym and tf and sf:
             cleaned.append(
-                {"source": src, "symbol": sym, "timeframe": tf, "strategy_file": sf}
+                {
+                    "source": src,
+                    "symbol": sym,
+                    "timeframe": tf,
+                    "strategy_file": sf,
+                    "refresh_seconds": _as_refresh_seconds(w.get("refresh_seconds")),
+                }
             )
     out["realtime_watches"] = cleaned
     out["feishu_enabled"] = bool(out.get("feishu_enabled", False))
@@ -208,6 +228,7 @@ def save_settings(data: dict) -> dict:
                         "symbol": sym,
                         "timeframe": tf,
                         "strategy_file": sf,
+                        "refresh_seconds": _as_refresh_seconds(w.get("refresh_seconds")),
                     }
                 )
         current["realtime_watches"] = cleaned

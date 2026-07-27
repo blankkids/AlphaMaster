@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from web.data_sources.base import Bar
 from web.realtime_manager import (
     RealtimeManager,
     WatchTask,
     _build_data_snapshot,
+    _normalize_refresh_seconds,
 )
 
 
@@ -30,7 +33,7 @@ def _task() -> WatchTask:
         strategy_symbol="159170",
         strategy_timeframe="5m",
         best_score=1.0,
-        cadence_s=30,
+        cadence_s=5,
     )
 
 
@@ -51,6 +54,21 @@ def test_build_data_snapshot_contains_range_and_latest_ohlcv() -> None:
             "volume": 250.0,
         },
     }
+
+
+def test_realtime_refresh_seconds_default_and_validation() -> None:
+    assert _normalize_refresh_seconds(None) == 5
+    assert _normalize_refresh_seconds("12") == 12
+    with pytest.raises(ValueError, match="刷新秒数"):
+        _normalize_refresh_seconds(0)
+    with pytest.raises(ValueError, match="刷新秒数"):
+        _normalize_refresh_seconds(3601)
+
+
+def test_watch_exposes_and_persists_refresh_seconds() -> None:
+    task = _task()
+    assert task.to_public()["refresh_seconds"] == 5
+    assert task.persist_dict()["refresh_seconds"] == 5
 
 
 def test_realtime_status_exposes_snapshot_even_when_history_is_insufficient() -> None:

@@ -6,6 +6,7 @@ let selectedStrategySymbol = null;
 let chart = null;
 let chartSymbol = null;
 let pollTimer = null;
+let realtimePollTimer = null;
 let clientErrors = [];
 let debugMode = false;
 let lastDebugViewContent = "";
@@ -1968,6 +1969,12 @@ async function initRealtimeOnce() {
     if (data.min_exposure != null && $("rtThresholdHint")) {
       $("rtThresholdHint").textContent = `无信号阈值 |tanh(因子)| < ${data.min_exposure}`;
     }
+    const refreshInput = $("rtRefreshSeconds");
+    if (refreshInput) {
+      refreshInput.value = String(data.default_refresh_seconds || 5);
+      refreshInput.min = String(data.min_refresh_seconds || 1);
+      refreshInput.max = String(data.max_refresh_seconds || 3600);
+    }
     onRtSourceChange();
   } catch (e) {
     await logClientError("加载数据源失败: " + e.message);
@@ -2202,6 +2209,7 @@ async function rtAddWatch() {
   const symbol = ($("rtSymbolInput")?.value || "").trim();
   const timeframe = $("rtTimeframeSelect")?.value;
   const strategy_file = $("rtStrategySelect")?.value;
+  const refresh_seconds = Number($("rtRefreshSeconds")?.value || 5);
   const picked = $("rtStrategyPicked");
   if (!symbol) {
     if (picked) { picked.textContent = "请填写品种"; picked.classList.add("bad"); }
@@ -2209,6 +2217,13 @@ async function rtAddWatch() {
   }
   if (!strategy_file) {
     if (picked) { picked.textContent = "请选择或导入策略因子"; picked.classList.add("bad"); }
+    return;
+  }
+  if (!Number.isInteger(refresh_seconds) || refresh_seconds < 1 || refresh_seconds > 3600) {
+    if (picked) {
+      picked.textContent = "刷新秒数必须是 1 到 3600 之间的整数";
+      picked.classList.add("bad");
+    }
     return;
   }
   const btn = $("rtAddBtn");
@@ -2221,7 +2236,13 @@ async function rtAddWatch() {
     await fetchJSON("/api/realtime/watch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, symbol, timeframe, strategy_file }),
+      body: JSON.stringify({
+        source,
+        symbol,
+        timeframe,
+        strategy_file,
+        refresh_seconds,
+      }),
     });
     if (picked) picked.classList.remove("bad");
     rtEngineRunning = true;
@@ -2427,6 +2448,7 @@ function renderRealtimeGrid(watches) {
         w.updated_at,
         w.session_live ? 1 : 0,
         w.next_bar_close_at || "",
+        w.refresh_seconds || 5,
       ].join("~")
     )
     .join("|");
@@ -2489,6 +2511,7 @@ function renderRealtimeGrid(watches) {
       <div class="rt-meta">
         <span class="rt-meta-item">因子 <b>${factorText}</b></span>
         <span class="rt-meta-item">${escHtml(w.strategy_name)}</span>
+        <span class="rt-meta-item">刷新 ${escHtml(w.refresh_seconds || 5)} 秒</span>
       </div>
       <div class="rt-foot">
         <span class="rt-state ${w.state}">${RT_STATE_LABEL[w.state] || w.state}</span>
@@ -2591,11 +2614,14 @@ function renderRealtimeData(watches) {
 
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
+  if (realtimePollTimer) clearInterval(realtimePollTimer);
   pollTimer = setInterval(() => {
     refreshOverview();
     if (currentPage === "backtest" || btActive) refreshBacktest();
-    if (currentPage === "realtime" || rtEngineRunning) refreshRealtime();
   }, 4000);
+  realtimePollTimer = setInterval(() => {
+    if (currentPage === "realtime" || rtEngineRunning) refreshRealtime();
+  }, 1000);
 }
 
 async function init() {

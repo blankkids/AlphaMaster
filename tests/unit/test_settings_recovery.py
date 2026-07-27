@@ -56,3 +56,28 @@ def test_save_settings_ignores_ephemeral_path(project: Path, monkeypatch: pytest
     )
     loaded = load_settings()
     assert loaded["last_data_file"] == "D:\\real\\XAUUSD_H1.parquet"
+
+
+def test_realtime_watch_refresh_seconds_are_persisted_with_default(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = project / "web_settings.json"
+    monkeypatch.setattr(settings_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(settings_mod, "PROJECT_ROOT", project)
+    base_watch = {
+        "source": "tongdaxin",
+        "symbol": "159170",
+        "timeframe": "5m",
+        "strategy_file": "strategies/best_159170.json",
+    }
+
+    saved = save_settings(
+        {"realtime_watches": [{**base_watch, "refresh_seconds": 12}]}
+    )
+    assert saved["realtime_watches"][0]["refresh_seconds"] == 12
+
+    settings_path.write_text(
+        json.dumps({"realtime_watches": [base_watch]}), encoding="utf-8"
+    )
+    loaded = load_settings()
+    assert loaded["realtime_watches"][0]["refresh_seconds"] == 5

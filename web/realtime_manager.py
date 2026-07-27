@@ -24,11 +24,10 @@ from web.settings import load_settings, save_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-# 每个周期的轮询节奏（秒）
-_CADENCE = {
-    "1m": 15, "5m": 30, "15m": 45, "30m": 60,
-    "1h": 60, "4h": 120, "1d": 300, "1w": 600, "1M": 600,
-}
+# 每个监控项可独立设置数据刷新秒数；信号仍使用已收盘 K 线计算。
+DEFAULT_REFRESH_SECONDS = 5
+MIN_REFRESH_SECONDS = 1
+MAX_REFRESH_SECONDS = 3600
 # K 线周期长度（秒）；用于推算「下一根已收盘 bar」时间
 _TF_SECONDS = {
     "1m": 60,
@@ -41,14 +40,21 @@ _TF_SECONDS = {
     "1w": 604800,
     "1M": 2592000,  # 近似 30 天
 }
-_DEFAULT_CADENCE = 60
 _N_BARS = 3500                # 每次拉取的历史 bar 数（喂给特征引擎，需 ≥ Config.MIN_BARS=3000）
 _HISTORY_LEN = 60             # 保留的信号强度历史点数（供 sparkline）
 _VALID_KINDS = {k for k, _ in SOURCE_KINDS}
 
 
-def _cadence_for(tf: str) -> int:
-    return _CADENCE.get(tf, _DEFAULT_CADENCE)
+def _normalize_refresh_seconds(value: Any) -> int:
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        seconds = DEFAULT_REFRESH_SECONDS
+    if not MIN_REFRESH_SECONDS <= seconds <= MAX_REFRESH_SECONDS:
+        raise ValueError(
+            f"刷新秒数必须在 {MIN_REFRESH_SECONDS} 到 {MAX_REFRESH_SECONDS} 之间"
+        )
+    return seconds
 
 
 def _next_bar_close_at(last_bar_open: int | None, timeframe: str, now: float | None = None) -> int | None:
@@ -183,6 +189,7 @@ class WatchTask:
             "strategy_symbol": self.strategy_symbol,
             "strategy_timeframe": self.strategy_timeframe,
             "best_score": self.best_score,
+            "refresh_seconds": self.cadence_s,
             "state": self.state,
             "direction": self.direction,
             "strength": self.strength,
@@ -211,6 +218,7 @@ class WatchTask:
             "symbol": self.symbol,
             "timeframe": self.timeframe,
             "strategy_file": self.strategy_file,
+            "refresh_seconds": self.cadence_s,
         }
 
 
@@ -239,6 +247,7 @@ class RealtimeManager:
                 self._add_task_internal(
                     w["source"], w["symbol"], w["timeframe"], w["strategy_file"],
                     persist=False,
+                    refresh_seconds=w.get("refresh_seconds", DEFAULT_REFRESH_SECONDS),
                 )
             except Exception:
                 continue
@@ -249,17 +258,38 @@ class RealtimeManager:
         save_settings({"realtime_watches": [t.persist_dict() for t in self._tasks.values()]})
 
     # ── 增删 ────────────────────────────────────────────────────────────
-    def add_watch(self, source: str, symbol: str, timeframe: str, strategy_file: str) -> dict[str, Any]:
-        task = self._add_task_internal(source, symbol, timeframe, strategy_file, persist=True)
+    def add_watch(
+        self,
+        source: str,
+        symbol: str,
+        timeframe: str,
+        strategy_file: str,
+        refresh_seconds: int = DEFAULT_REFRESH_SECONDS,
+    ) -> dict[str, Any]:
+        task = self._add_task_internal(
+            source,
+            symbol,
+            timeframe,
+            strategy_file,
+            persist=True,
+            refresh_seconds=refresh_seconds,
+        )
         self._ensure_thread()
         return task.to_public()
 
     def _add_task_internal(
-        self, source: str, symbol: str, timeframe: str, strategy_file: str, persist: bool
+        self,
+        source: str,
+        symbol: str,
+        timeframe: str,
+        strategy_file: str,
+        persist: bool,
+        refresh_seconds: int = DEFAULT_REFRESH_SECONDS,
     ) -> WatchTask:
         source = (source or "").strip()
         symbol = (symbol or "").strip()
         timeframe = (timeframe or "").strip()
+        refresh_seconds = _normalize_refresh_seconds(refresh_seconds)
         if source not in _VALID_KINDS:
             raise ValueError(f"未知数据源: {source}")
         if not symbol:
@@ -298,7 +328,7 @@ class RealtimeManager:
             strategy_symbol=meta.get("symbol"),
             strategy_timeframe=meta.get("timeframe"),
             best_score=meta.get("best_score"),
-            cadence_s=_cadence_for(timeframe),
+            cadence_s=refresh_seconds,
             warn=warn,
             next_due=0.0,
         )
@@ -360,7 +390,7 @@ class RealtimeManager:
                 self._tick()
             except Exception:
                 pass
-            time.sleep(1.5)
+            time.sleep(0.25)
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -375,10 +405,16 @@ class RealtimeManager:
             task.next_due = now + task.cadence_s
             self._executor.submit(self._evaluate_task, task)
 
-    def _get_bars(self, source: str, symbol: str, timeframe: str):
+    def _get_bars(
+        self,
+        source: str,
+        symbol: str,
+        timeframe: str,
+        refresh_seconds: int = DEFAULT_REFRESH_SECONDS,
+    ):
         """带短 TTL 缓存的 K 线抓取（同一 源/品种/周期 的多因子复用）。"""
         key = (source, symbol, timeframe)
-        ttl = max(10.0, _cadence_for(timeframe) * 0.8)
+        ttl = max(0.1, _normalize_refresh_seconds(refresh_seconds) * 0.8)
         now = time.monotonic()
         cached = self._bar_cache.get(key)
         if cached and (now - cached[0]) < ttl:
@@ -391,7 +427,9 @@ class RealtimeManager:
 
     def _evaluate_task(self, task: WatchTask) -> None:
         try:
-            bars = self._get_bars(task.source, task.symbol, task.timeframe)
+            bars = self._get_bars(
+                task.source, task.symbol, task.timeframe, task.cadence_s
+            )
             if not bars:
                 self._set_error(task, "未获取到 K 线")
                 return
