@@ -120,6 +120,27 @@ def _load_strategy_meta(path: str) -> dict[str, Any]:
     }
 
 
+def _build_data_snapshot(bars: list, read_at: float | None = None) -> dict[str, Any] | None:
+    """把一次监控实际读取到的 K 线压缩为前端可展示的摘要。"""
+    if not bars:
+        return None
+    latest = bars[-1]
+    return {
+        "bar_count": len(bars),
+        "first_bar_ts": int(bars[0].ts),
+        "last_bar_ts": int(latest.ts),
+        "read_at": float(read_at if read_at is not None else time.time()),
+        "latest_bar": {
+            "ts": int(latest.ts),
+            "open": float(latest.open),
+            "high": float(latest.high),
+            "low": float(latest.low),
+            "close": float(latest.close),
+            "volume": float(latest.volume),
+        },
+    }
+
+
 @dataclass
 class WatchTask:
     id: str
@@ -147,6 +168,7 @@ class WatchTask:
     warn: str = ""
     next_due: float = 0.0
     history: deque = field(default_factory=lambda: deque(maxlen=_HISTORY_LEN))
+    data_snapshot: dict[str, Any] | None = None
 
     def to_public(self) -> dict[str, Any]:
         now = time.time()
@@ -179,6 +201,7 @@ class WatchTask:
             "warn": self.warn,
             "threshold": min_exposure(),
             "history": list(self.history),
+            "data_snapshot": self.data_snapshot,
         }
 
     def persist_dict(self) -> dict[str, Any]:
@@ -372,6 +395,7 @@ class RealtimeManager:
             if not bars:
                 self._set_error(task, "未获取到 K 线")
                 return
+            task.data_snapshot = _build_data_snapshot(bars)
             last_ts = bars[-1].ts
             raw = bars_to_raw_dict(bars)
             result = evaluate_signal(task.formula, raw)

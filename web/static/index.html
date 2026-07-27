@@ -493,6 +493,42 @@
         </details>
       </section>
 
+      <section class="panel rt-data-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <div class="panel-head">
+          <div>
+            <h2>监控读取数据</h2>
+            <p class="rt-data-desc">展示每个监控项实际读取到的最新已收盘 K 线，便于核对数据源和信号输入。</p>
+          </div>
+          <span class="hint" id="rtDataHint">等待监控读取</span>
+        </div>
+        <div class="rt-data-table-wrap">
+          <table class="rt-data-table">
+            <thead>
+              <tr>
+                <th>监控项</th>
+                <th>数据源</th>
+                <th>根数</th>
+                <th>数据区间</th>
+                <th>最新 K 线</th>
+                <th>开盘</th>
+                <th>最高</th>
+                <th>最低</th>
+                <th>收盘</th>
+                <th>成交量</th>
+                <th>读取时间</th>
+              </tr>
+            </thead>
+            <tbody id="rtDataBody">
+              <tr class="rt-data-empty-row">
+                <td colspan="11">尚无监控项，添加监控后将在这里显示实际读取的数据。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="panel rt-feishu-panel">
         <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
         <span class="hud-corner bl"></span><span class="hud-corner br"></span>

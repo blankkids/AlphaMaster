@@ -1822,6 +1822,7 @@ let rtSources = [];
 let rtSourceById = {};
 let rtImportedStrategy = null; // {path, name}
 let rtGridSig = "";
+let rtDataSig = "";
 let rtServerSkew = 0; // server_time - local_now（秒）
 let rtCountdownTimer = null;
 let rtTvBlockedShownAt = 0;
@@ -1874,6 +1875,25 @@ function escHtml(s) {
 function rtClock(ts) {
   if (!ts) return "—";
   return new Date(ts * 1000).toLocaleTimeString();
+}
+
+function rtDateTime(ts) {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+
+function rtNumber(value, kind = "price") {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  const num = Number(value);
+  if (kind === "volume") {
+    return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(num);
+  }
+  const abs = Math.abs(num);
+  const digits = abs >= 1000 ? 2 : abs >= 1 ? 4 : 6;
+  return num.toLocaleString("zh-CN", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: digits,
+  });
 }
 
 function rtNowSec() {
@@ -2365,6 +2385,7 @@ async function refreshRealtime() {
     }
   }
   renderRealtimeGrid(st.watches || []);
+  renderRealtimeData(st.watches || []);
   maybeShowTvBlockedFromWatches(st.watches || []);
   ensureRtCountdownTimer();
   tickRtCountdowns();
@@ -2493,6 +2514,79 @@ function renderRealtimeGrid(watches) {
     .join("");
 
   runCountUp(grid);
+}
+
+function renderRealtimeData(watches) {
+  const body = $("rtDataBody");
+  const hint = $("rtDataHint");
+  if (!body) return;
+
+  const snapshots = watches.filter((w) => w.data_snapshot);
+  if (hint) {
+    hint.textContent = watches.length
+      ? `已读取 ${snapshots.length}/${watches.length} 项`
+      : "等待监控读取";
+  }
+
+  const sig = watches
+    .map((w) => {
+      const d = w.data_snapshot || {};
+      const b = d.latest_bar || {};
+      return [
+        w.id,
+        w.state,
+        w.message,
+        d.bar_count,
+        d.first_bar_ts,
+        d.last_bar_ts,
+        d.read_at,
+        b.open,
+        b.high,
+        b.low,
+        b.close,
+        b.volume,
+      ].join("~");
+    })
+    .join("|");
+  if (sig === rtDataSig) return;
+  rtDataSig = sig;
+
+  if (!watches.length) {
+    body.innerHTML =
+      '<tr class="rt-data-empty-row"><td colspan="11">尚无监控项，添加监控后将在这里显示实际读取的数据。</td></tr>';
+    return;
+  }
+
+  body.innerHTML = watches
+    .map((w) => {
+      const srcLabel = (rtSourceById[w.source] || {}).label || w.source;
+      const d = w.data_snapshot;
+      if (!d) {
+        const waiting = w.message || (w.state === "pending" ? "等待首次读取" : "暂未读取到数据");
+        return `<tr>
+          <td><div class="rt-data-symbol">${escHtml(w.symbol)} <span>${escHtml(w.timeframe)}</span></div></td>
+          <td>${escHtml(srcLabel)}</td>
+          <td colspan="9"><span class="rt-data-wait">${escHtml(waiting)}</span></td>
+        </tr>`;
+      }
+
+      const bar = d.latest_bar || {};
+      const range = `${rtDateTime(d.first_bar_ts)} → ${rtDateTime(d.last_bar_ts)}`;
+      return `<tr>
+        <td><div class="rt-data-symbol">${escHtml(w.symbol)} <span>${escHtml(w.timeframe)}</span></div></td>
+        <td><span class="rt-data-source">${escHtml(srcLabel)}</span></td>
+        <td class="rt-data-number">${escHtml(rtNumber(d.bar_count, "volume"))}</td>
+        <td class="rt-data-range">${escHtml(range)}</td>
+        <td class="rt-data-time">${escHtml(rtDateTime(bar.ts))}</td>
+        <td class="rt-data-number">${escHtml(rtNumber(bar.open))}</td>
+        <td class="rt-data-number rt-data-high">${escHtml(rtNumber(bar.high))}</td>
+        <td class="rt-data-number rt-data-low">${escHtml(rtNumber(bar.low))}</td>
+        <td class="rt-data-number rt-data-close">${escHtml(rtNumber(bar.close))}</td>
+        <td class="rt-data-number">${escHtml(rtNumber(bar.volume, "volume"))}</td>
+        <td class="rt-data-time">${escHtml(rtDateTime(d.read_at))}</td>
+      </tr>`;
+    })
+    .join("");
 }
 
 function startPolling() {

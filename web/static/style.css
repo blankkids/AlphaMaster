@@ -1840,6 +1840,102 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
   gap: 16px;
 }
 
+.rt-data-panel .panel-head {
+  align-items: flex-start;
+  gap: 18px;
+}
+
+.rt-data-panel .panel-head h2 { margin-bottom: 5px; }
+
+.rt-data-desc {
+  margin: 0;
+  max-width: 720px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.rt-data-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: rgba(8, 12, 20, 0.55);
+}
+
+.rt-data-table {
+  width: 100%;
+  min-width: 1180px;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+}
+
+.rt-data-table th,
+.rt-data-table td {
+  padding: 11px 12px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid rgba(130, 150, 180, 0.12);
+}
+
+.rt-data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--text-muted);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  background: rgba(14, 20, 31, 0.96);
+}
+
+.rt-data-table tbody tr:last-child td { border-bottom: 0; }
+.rt-data-table tbody tr:hover { background: rgba(94, 234, 212, 0.035); }
+
+.rt-data-symbol {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.rt-data-symbol span {
+  margin-left: 5px;
+  padding: 1px 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 400;
+}
+
+.rt-data-source {
+  color: var(--text);
+}
+
+.rt-data-number {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.rt-data-range,
+.rt-data-time {
+  color: var(--text-muted);
+}
+
+.rt-data-high { color: var(--success); }
+.rt-data-low { color: var(--danger); }
+.rt-data-close { color: var(--accent); font-weight: 600; }
+
+.rt-data-wait {
+  color: var(--text-muted);
+  font-family: var(--sans);
+}
+
+.rt-data-empty-row td {
+  padding: 22px 14px;
+  text-align: center;
+  color: var(--text-muted);
+  font-family: var(--sans);
+}
+
 .rt-card {
   position: relative;
   padding: 14px 14px 12px;
