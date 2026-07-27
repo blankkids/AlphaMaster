@@ -76,6 +76,7 @@
       <div class="launch-form launch-form-file">
         <div class="launch-row launch-row-main">
           <button type="button" class="btn btn-secondary btn-browse" id="browseBtn">选择数据文件</button>
+          <input type="file" id="dataFileInput" accept=".parquet" hidden />
           <div class="data-file-card" id="dataFileCard">
             <div class="data-file-empty">尚未选择数据文件</div>
           </div>
@@ -261,6 +262,7 @@
         <div class="launch-form launch-form-file">
           <div class="launch-row launch-row-main">
             <button type="button" class="btn btn-secondary btn-browse" id="btBrowseStrategyBtn">选择策略</button>
+            <input type="file" id="strategyFileInput" accept=".json,application/json" hidden />
             <div class="data-file-card" id="btStrategyCard">
               <div class="data-file-empty">尚未选择策略文件</div>
             </div>

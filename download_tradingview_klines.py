@@ -12,12 +12,17 @@
     # 下载最近 3000 根
     python download_tradingview_klines.py SZSE:159170 -t 5m --bars 3000
 
+    # 首次打开浏览器登录；以后普通命令会自动复用登录态
+    python download_tradingview_klines.py 520840 -t 5m --all --login
+
 输出列固定为：
     time, open, high, low, close, tick_volume
 
 说明：
-    - 默认优先使用本机 Chrome/Edge 中的浏览器 WebSocket，因为某些网络会阻断
-      Python websocket-client，但允许浏览器访问 TradingView。
+    - 默认优先使用专用 Chrome/Edge 配置中的 TradingView 登录态；首次可加
+      --login 完成登录。没有登录态或认证失败时自动回退匿名连接。
+    - 也可通过 TRADINGVIEW_AUTH_TOKEN 环境变量或 web_settings.json 中的
+      tradingview_auth_token 配置登录令牌。
     - --transport websocket 可强制使用 Python WebSocket。
     - 匿名访问的历史深度、品种和交易所覆盖范围由 TradingView 决定。
 """
@@ -36,6 +41,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -45,6 +51,8 @@ TV_WS_URL = (
     "wss://data.tradingview.com/socket.io/websocket"
     "?from=www.tradingview.com%2Fchart%2F"
 )
+UNAUTHORIZED_USER_TOKEN = "unauthorized_user_token"
+TRADINGVIEW_AUTH_TOKEN_ENV = "TRADINGVIEW_AUTH_TOKEN"
 
 TIMEFRAMES: dict[str, tuple[str, str, int]] = {
     # CLI token: (TradingView interval, AlphaMaster filename tag, nominal seconds)
@@ -169,7 +177,7 @@ async (opts) => {
         `={"symbol":"${opts.proName}",` +
         `"adjustment":"${opts.adjustment}","session":"${opts.session}"}`;
       const messages = [
-        ["set_auth_token", ["unauthorized_user_token"]],
+        ["set_auth_token", [opts.authToken]],
         ["chart_create_session", [chartSession, ""]],
         ["resolve_symbol", [chartSession, "symbol_1", symbolSpec]],
         [
@@ -203,8 +211,12 @@ async (opts) => {
           continue;
         }
 
-        if (message.m === "symbol_error" || message.m === "critical_error") {
-          fail(`TradingView 品种解析失败：${opts.proName}`);
+        if (
+          message.m === "symbol_error" ||
+          message.m === "critical_error" ||
+          message.m === "protocol_error"
+        ) {
+          fail(`TradingView 认证、协议或品种解析失败：${opts.proName}`);
           return;
         }
 
@@ -268,6 +280,59 @@ class DownloadRequest:
     timeout_seconds: int
     session: str
     adjustment: str
+
+
+def load_configured_auth_token(
+    settings_path: str | Path | None = None,
+) -> tuple[str | None, str | None]:
+    """读取 TradingView 登录令牌，但不把令牌内容写入日志。
+
+    优先使用环境变量，其次读取项目 web_settings.json 中的
+    tradingview_auth_token。返回值第二项仅用于显示凭证来源。
+    """
+    env_token = str(os.getenv(TRADINGVIEW_AUTH_TOKEN_ENV, "")).strip()
+    if env_token and env_token != UNAUTHORIZED_USER_TOKEN:
+        return env_token, f"环境变量 {TRADINGVIEW_AUTH_TOKEN_ENV}"
+
+    path = (
+        Path(settings_path)
+        if settings_path is not None
+        else Path(__file__).resolve().parent / "web_settings.json"
+    )
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        file_token = str(settings.get("tradingview_auth_token", "")).strip()
+    except (OSError, ValueError, TypeError):
+        file_token = ""
+    if file_token and file_token != UNAUTHORIZED_USER_TOKEN:
+        return file_token, "web_settings.json"
+    return None, None
+
+
+def default_browser_profile_dir() -> Path:
+    """返回保存 TradingView 登录态的专用浏览器目录。"""
+    configured = str(os.getenv("TRADINGVIEW_PROFILE_DIR", "")).strip()
+    if configured:
+        return Path(configured).expanduser()
+    local_app_data = str(os.getenv("LOCALAPPDATA", "")).strip()
+    base = Path(local_app_data) if local_app_data else Path.home() / ".alphamaster"
+    return base / "AlphaMaster" / "TradingViewBrowser"
+
+
+def _extract_auth_token(frame: str) -> str | None:
+    """从 TradingView WebSocket 发送帧中提取登录令牌。"""
+    for payload in _decode_frames(str(frame)):
+        try:
+            message = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if message.get("m") != "set_auth_token":
+            continue
+        params = message.get("p") or []
+        token = str(params[0]).strip() if params else ""
+        if token and token != UNAUTHORIZED_USER_TOKEN:
+            return token
+    return None
 
 
 def normalize_timeframe(value: str) -> str:
@@ -385,7 +450,10 @@ def _need_more(
     return eligible < request.target_bars
 
 
-def fetch_with_websocket(request: DownloadRequest) -> tuple[list[dict], int]:
+def fetch_with_websocket(
+    request: DownloadRequest,
+    auth_token: str | None = None,
+) -> tuple[list[dict], int]:
     """使用 websocket-client 直接连接 TradingView。"""
     try:
         from websocket import create_connection
@@ -416,7 +484,7 @@ def fetch_with_websocket(request: DownloadRequest) -> tuple[list[dict], int]:
     )
     initial = min(request.chunk_size, request.max_bars)
     messages = [
-        ("set_auth_token", ["unauthorized_user_token"]),
+        ("set_auth_token", [auth_token or UNAUTHORIZED_USER_TOKEN]),
         ("chart_create_session", [chart_session, ""]),
         ("resolve_symbol", [chart_session, "symbol_1", "=" + symbol_spec]),
         (
@@ -452,8 +520,15 @@ def fetch_with_websocket(request: DownloadRequest) -> tuple[list[dict], int]:
                 except json.JSONDecodeError:
                     continue
                 method = message.get("m")
-                if method in {"symbol_error", "critical_error"}:
-                    raise RuntimeError(f"TradingView 品种解析失败: {request.pro_name}")
+                if method in {
+                    "symbol_error",
+                    "critical_error",
+                    "protocol_error",
+                }:
+                    raise RuntimeError(
+                        "TradingView 认证、协议或品种解析失败: "
+                        f"{request.pro_name}"
+                    )
                 if method == "timescale_update":
                     series = ((message.get("p") or [None, {}])[1] or {}).get("s1", {})
                     for item in series.get("s") or []:
@@ -516,8 +591,14 @@ def _browser_channels() -> list[tuple[str, str | None]]:
     return candidates
 
 
-def fetch_with_browser(request: DownloadRequest) -> tuple[list[dict], int]:
-    """在本机 Chrome/Edge 页面上下文中连接 TradingView。"""
+def fetch_with_browser(
+    request: DownloadRequest,
+    *,
+    configured_auth_token: str | None = None,
+    profile_dir: str | Path | None = None,
+    interactive_login: bool = False,
+) -> tuple[list[dict], int, str]:
+    """优先使用登录账户，并在不可用时回退到匿名浏览器连接。"""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -539,12 +620,19 @@ def fetch_with_browser(request: DownloadRequest) -> tuple[list[dict], int]:
         "adjustment": request.adjustment,
     }
 
+    user_data_dir = (
+        Path(profile_dir).expanduser()
+        if profile_dir is not None
+        else default_browser_profile_dir()
+    ).resolve()
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+
     launch_errors: list[str] = []
     with sync_playwright() as playwright:
-        browser = None
+        context = None
         for channel, executable in _browser_channels():
             kwargs: dict[str, Any] = {
-                "headless": True,
+                "headless": not interactive_login,
                 "args": ["--disable-blink-features=AutomationControlled"],
             }
             if executable:
@@ -552,30 +640,94 @@ def fetch_with_browser(request: DownloadRequest) -> tuple[list[dict], int]:
             else:
                 kwargs["channel"] = channel
             try:
-                browser = playwright.chromium.launch(**kwargs)
+                context = playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(user_data_dir),
+                    **kwargs,
+                )
                 break
             except Exception as exc:
                 launch_errors.append(f"{channel}: {exc}")
-        if browser is None:
+        if context is None:
             raise RuntimeError(
                 "无法启动 Chrome/Edge。请安装其中一个浏览器。\n"
                 + "\n".join(launch_errors[-2:])
             )
 
         try:
-            page = browser.new_page()
+            page = context.pages[0] if context.pages else context.new_page()
+            captured_tokens: list[str] = []
+
+            def capture_websocket(websocket: Any) -> None:
+                def capture_frame(frame: str) -> None:
+                    token = _extract_auth_token(frame)
+                    if token:
+                        captured_tokens.append(token)
+
+                websocket.on("framesent", capture_frame)
+
+            page.on("websocket", capture_websocket)
             page.goto(
-                "https://www.tradingview.com/",
+                "https://www.tradingview.com/chart/?symbol="
+                + quote(request.pro_name, safe=""),
                 wait_until="domcontentloaded",
                 timeout=60_000,
             )
-            result = page.evaluate(_BROWSER_FETCH_JS, options)
+            page.wait_for_timeout(3_000)
+
+            if interactive_login and not captured_tokens:
+                print(
+                    "[认证] 请在打开的浏览器中登录 TradingView；"
+                    "登录完成后回到终端按 Enter ...",
+                    flush=True,
+                )
+                try:
+                    input()
+                except EOFError:
+                    print("[认证] 当前终端无法交互，将使用匿名连接。")
+                else:
+                    captured_tokens.clear()
+                    page.reload(wait_until="domcontentloaded", timeout=60_000)
+                    page.wait_for_timeout(5_000)
+
+            attempts: list[tuple[str, str]] = []
+            if configured_auth_token:
+                attempts.append(("登录账户（配置令牌）", configured_auth_token))
+            if captured_tokens:
+                attempts.append(("登录账户（浏览器登录态）", captured_tokens[-1]))
+            attempts.append(("匿名连接", UNAUTHORIZED_USER_TOKEN))
+
+            deduplicated: list[tuple[str, str]] = []
+            seen_tokens: set[str] = set()
+            for label, token in attempts:
+                if token in seen_tokens:
+                    continue
+                seen_tokens.add(token)
+                deduplicated.append((label, token))
+
+            errors: list[str] = []
+            for index, (auth_label, token) in enumerate(deduplicated):
+                options["authToken"] = token
+                try:
+                    result = page.evaluate(_BROWSER_FETCH_JS, options)
+                    return (
+                        list(result.get("bars") or []),
+                        int(result.get("pages") or 0),
+                        auth_label,
+                    )
+                except Exception as exc:
+                    errors.append(f"{auth_label}: {exc}")
+                    if index + 1 < len(deduplicated):
+                        print(
+                            f"[认证] {auth_label}不可用，尝试"
+                            f"{deduplicated[index + 1][0]} ...",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+            raise RuntimeError("\n".join(errors))
         except Exception as exc:
             raise RuntimeError(f"浏览器抓取 TradingView 失败: {exc}") from exc
         finally:
-            browser.close()
-
-    return list(result.get("bars") or []), int(result.get("pages") or 0)
+            context.close()
 
 
 def prepare_dataframe(
@@ -736,6 +888,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="连接方式；auto先浏览器后Python WebSocket（默认auto）",
     )
     parser.add_argument(
+        "--login",
+        action="store_true",
+        help="打开浏览器登录 TradingView，并保存登录态供以后自动复用",
+    )
+    parser.add_argument(
+        "--profile-dir",
+        help=(
+            "TradingView 专用浏览器配置目录；默认使用 "
+            "%LOCALAPPDATA%/AlphaMaster/TradingViewBrowser"
+        ),
+    )
+    parser.add_argument(
         "--session",
         choices=("regular", "extended"),
         default="regular",
@@ -779,6 +943,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--chunk-size 必须在1到5000之间")
     if args.max_bars < args.bars and not args.start and not args.all:
         parser.error("--max-bars 不能小于 --bars")
+    if args.login and args.transport == "websocket":
+        parser.error("--login 需要 browser 或 auto 连接方式")
 
     try:
         pro_name = infer_pro_name(args.symbol, args.exchange)
@@ -827,11 +993,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"开始       : {args.start or '按根数/全部历史决定'}")
     print(f"结束       : {args.end or '最新'}")
     print(f"连接方式   : {args.transport}")
+    print("认证       : 登录账户优先，匿名连接回退")
     print(f"输出       : {output.resolve()}")
     print("=" * 68)
 
+    configured_auth_token, auth_source = load_configured_auth_token()
+    if auth_source:
+        print(f"[认证] 已从{auth_source}读取登录令牌。")
+
     rows: list[dict] | None = None
     pages = 0
+    auth_label = ""
     errors: list[str] = []
     transports = (
         ("browser", "websocket")
@@ -842,10 +1014,39 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[连接] 尝试 {transport} ...", flush=True)
         try:
             if transport == "browser":
-                rows, pages = fetch_with_browser(request)
+                rows, pages, auth_label = fetch_with_browser(
+                    request,
+                    configured_auth_token=configured_auth_token,
+                    profile_dir=args.profile_dir,
+                    interactive_login=bool(args.login),
+                )
             else:
-                rows, pages = fetch_with_websocket(request)
-            print(f"[连接] {transport} 成功")
+                websocket_attempts: list[tuple[str, str | None]] = []
+                if configured_auth_token:
+                    websocket_attempts.append(
+                        ("登录账户（配置令牌）", configured_auth_token)
+                    )
+                websocket_attempts.append(("匿名连接", None))
+                websocket_errors: list[str] = []
+                for index, (candidate_label, token) in enumerate(
+                    websocket_attempts
+                ):
+                    try:
+                        rows, pages = fetch_with_websocket(request, token)
+                        auth_label = candidate_label
+                        break
+                    except Exception as exc:
+                        websocket_errors.append(f"{candidate_label}: {exc}")
+                        if index + 1 < len(websocket_attempts):
+                            print(
+                                f"[认证] {candidate_label}不可用，"
+                                "尝试匿名连接 ...",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                if rows is None:
+                    raise RuntimeError("\n".join(websocket_errors))
+            print(f"[连接] {transport} 成功（{auth_label}）")
             break
         except Exception as exc:
             message = f"{transport}: {exc}"
@@ -857,6 +1058,13 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
+
+    if args.all and interval_seconds < 24 * 60 * 60:
+        print(
+            "[范围] --all 已读取当前账户权限可访问的全部分钟线；"
+            "实际历史深度仍受 TradingView 套餐上限约束。",
+            flush=True,
+        )
 
     if len(rows) >= request.max_bars:
         earliest_raw = min(int(row["time"]) for row in rows)

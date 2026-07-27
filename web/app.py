@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,8 @@ from strategy_manager.live_signal import min_exposure
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 BACKTEST_OUTPUT_DIR = ROOT / "backtest_output"
+DATA_UPLOAD_DIR = ROOT / "data" / "uploads"
+STRATEGY_UPLOAD_DIR = ROOT / "strategies" / "uploads"
 
 setup_logging()
 logger = get_logger()
@@ -265,6 +269,50 @@ def _inspect_strategy_or_http(path: str) -> dict[str, Any]:
         raise HTTPException(400, str(e)) from e
 
 
+def _save_browser_upload(
+    upload: UploadFile,
+    *,
+    upload_root: Path,
+    expected_suffix: str,
+) -> Path:
+    """将浏览器上传保存到隔离目录，避免覆盖服务器已有文件。"""
+    filename = Path(upload.filename or "").name.strip()
+    if not filename or filename in {".", ".."}:
+        raise HTTPException(400, "上传文件名无效")
+    if Path(filename).suffix.lower() != expected_suffix:
+        raise HTTPException(400, f"请选择 {expected_suffix} 文件")
+
+    upload_dir = upload_root / uuid.uuid4().hex
+    destination = upload_dir / filename
+    try:
+        upload_dir.mkdir(parents=True, exist_ok=False)
+        with destination.open("wb") as target:
+            shutil.copyfileobj(upload.file, target, length=1024 * 1024)
+        if destination.stat().st_size <= 0:
+            raise HTTPException(400, "上传文件为空")
+        return destination
+    except HTTPException:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        raise HTTPException(500, f"保存上传文件失败: {exc}") from exc
+
+
+def _remove_failed_upload(path: Path) -> None:
+    """只清理由本次上传创建的单层隔离目录。"""
+    try:
+        parent = path.parent.resolve()
+        allowed_roots = {
+            DATA_UPLOAD_DIR.resolve(),
+            STRATEGY_UPLOAD_DIR.resolve(),
+        }
+        if parent.parent.resolve() in allowed_roots:
+            shutil.rmtree(parent, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def _resolve_train_symbol(symbol: str | None = None) -> str | None:
     if symbol:
         return symbol.strip() or None
@@ -467,10 +515,42 @@ def api_browse_data_file() -> dict[str, Any]:
     return _browse_data_file()
 
 
+@app.post("/api/data-file/upload")
+def api_upload_data_file(file: UploadFile = File(...)) -> dict[str, Any]:
+    path = _save_browser_upload(
+        file,
+        upload_root=DATA_UPLOAD_DIR,
+        expected_suffix=".parquet",
+    )
+    try:
+        info = _inspect_or_http(str(path))
+    except HTTPException:
+        _remove_failed_upload(path)
+        raise
+    save_settings({"last_data_file": info["data_file"]})
+    return {"ok": True, "uploaded": True, **info}
+
+
 @app.post("/api/strategy-file/browse")
 @app.get("/api/strategy-file/browse")
 def api_browse_strategy_file() -> dict[str, Any]:
     return _browse_strategy_file()
+
+
+@app.post("/api/strategy-file/upload")
+def api_upload_strategy_file(file: UploadFile = File(...)) -> dict[str, Any]:
+    path = _save_browser_upload(
+        file,
+        upload_root=STRATEGY_UPLOAD_DIR,
+        expected_suffix=".json",
+    )
+    try:
+        info = _inspect_strategy_or_http(str(path))
+    except HTTPException:
+        _remove_failed_upload(path)
+        raise
+    save_settings({"last_strategy_file": info["strategy_file"]})
+    return {"ok": True, "uploaded": True, **info}
 
 
 @app.post("/api/strategy-file/sync-best")

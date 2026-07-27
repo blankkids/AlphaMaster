@@ -2,6 +2,7 @@ const API = "";
 let selectedDataFile = null;
 let selectedSymbol = null;
 let selectedStrategyFile = null;
+let strategyUploadTarget = "backtest";
 let selectedStrategySymbol = null;
 let chart = null;
 let chartSymbol = null;
@@ -896,13 +897,38 @@ async function runAiAnalyze() {
   }
 }
 
-async function browseStrategyFile() {
+function browseStrategyFile() {
+  strategyUploadTarget = "backtest";
+  $("strategyFileInput")?.click();
+}
+
+async function handleStrategyFileUpload(event) {
+  const input = event.target;
+  const file = input.files?.[0];
+  if (!file) return;
   try {
-    const res = await fetchJSON("/api/strategy-file/browse", { method: "POST" });
-    if (res.cancelled) return;
-    renderStrategyFileCard(res);
+    const body = new FormData();
+    body.append("file", file);
+    const res = await fetchJSON("/api/strategy-file/upload", {
+      method: "POST",
+      body,
+    });
+    if (strategyUploadTarget === "realtime") {
+      const name = res.filename || res.strategy_file;
+      rtImportedStrategy = {
+        path: res.strategy_file,
+        name,
+        symbol: (res.symbol || "").trim() || rtParseSymbolFromFilename(name),
+      };
+      await loadRtStrategies();
+      rtApplySymbolFromStrategy(rtImportedStrategy.symbol);
+    } else {
+      renderStrategyFileCard(res);
+    }
   } catch (e) {
     $("debugView")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } finally {
+    input.value = "";
   }
 }
 
@@ -937,15 +963,28 @@ async function loadBacktestStrategyContext() {
   }
 }
 
-async function browseDataFile() {
+function browseDataFile() {
+  $("dataFileInput")?.click();
+}
+
+async function handleDataFileUpload(event) {
+  const input = event.target;
+  const file = input.files?.[0];
+  if (!file) return;
   try {
-    const res = await fetchJSON("/api/data-file/browse", { method: "POST" });
-    if (res.cancelled) return;
+    const body = new FormData();
+    body.append("file", file);
+    const res = await fetchJSON("/api/data-file/upload", {
+      method: "POST",
+      body,
+    });
     renderDataFileCard(res);
     selectedSymbol = res.symbol;
     await loadSymbolChart(res.symbol);
   } catch (e) {
     $("debugView").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } finally {
+    input.value = "";
   }
 }
 
@@ -2220,21 +2259,9 @@ function onRtStrategyChange() {
   rtApplySymbolFromStrategy(sym);
 }
 
-async function rtBrowseStrategy() {
-  try {
-    const res = await fetchJSON("/api/strategy-file/browse", { method: "POST" });
-    if (res.cancelled) return;
-    const name = res.filename || res.strategy_file;
-    rtImportedStrategy = {
-      path: res.strategy_file,
-      name,
-      symbol: (res.symbol || "").trim() || rtParseSymbolFromFilename(name),
-    };
-    await loadRtStrategies();
-    rtApplySymbolFromStrategy(rtImportedStrategy.symbol);
-  } catch (e) {
-    await logClientError("导入策略失败: " + e.message);
-  }
+function rtBrowseStrategy() {
+  strategyUploadTarget = "realtime";
+  $("strategyFileInput")?.click();
 }
 
 async function rtAddWatch() {
@@ -2668,6 +2695,7 @@ async function init() {
     await logClientError("初始化失败: " + e.message);
   }
   $("browseBtn").addEventListener("click", browseDataFile);
+  $("dataFileInput").addEventListener("change", handleDataFileUpload);
   $("startBtn").addEventListener("click", startTraining);
   if ($("retrainBtn")) $("retrainBtn").addEventListener("click", retrainFromScratch);
   $("stopBtn").addEventListener("click", stopTraining);
@@ -2699,6 +2727,7 @@ async function init() {
 
   // 回测控制
   if ($("btBrowseStrategyBtn")) $("btBrowseStrategyBtn").addEventListener("click", browseStrategyFile);
+  if ($("strategyFileInput")) $("strategyFileInput").addEventListener("change", handleStrategyFileUpload);
   if ($("btStartBtn")) $("btStartBtn").addEventListener("click", startBacktest);
   if ($("btStopBtn")) $("btStopBtn").addEventListener("click", stopBacktest);
   ["btCommissionInput", "btSlippageInput"].forEach((id) => {

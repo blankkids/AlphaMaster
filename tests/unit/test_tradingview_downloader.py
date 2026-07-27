@@ -7,8 +7,12 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from download_tradingview_klines import (
+    _extract_auth_token,
+    _frame,
     default_output_path,
     infer_pro_name,
+    load_configured_auth_token,
+    main,
     parse_user_datetime,
     prepare_dataframe,
     validate_training_output_path,
@@ -67,3 +71,43 @@ def test_custom_output_must_keep_training_timeframe_suffix() -> None:
     validate_training_output_path(Path("exports/my_stock_M5.parquet"), "5m")
     with pytest.raises(ValueError, match="_M5.parquet"):
         validate_training_output_path(Path("exports/my_stock.parquet"), "5m")
+
+
+def test_extracts_authenticated_token_from_tradingview_frame() -> None:
+    frame = _frame("set_auth_token", ["signed-in-token"])
+    assert _extract_auth_token(frame) == "signed-in-token"
+    assert (
+        _extract_auth_token(
+            _frame("set_auth_token", ["unauthorized_user_token"])
+        )
+        is None
+    )
+
+
+def test_auth_token_prefers_environment_then_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_path = tmp_path / "web_settings.json"
+    settings_path.write_text(
+        '{"tradingview_auth_token": "settings-token"}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("TRADINGVIEW_AUTH_TOKEN", "environment-token")
+    assert load_configured_auth_token(settings_path) == (
+        "environment-token",
+        "环境变量 TRADINGVIEW_AUTH_TOKEN",
+    )
+
+    monkeypatch.delenv("TRADINGVIEW_AUTH_TOKEN")
+    assert load_configured_auth_token(settings_path) == (
+        "settings-token",
+        "web_settings.json",
+    )
+
+
+def test_login_rejects_websocket_only_transport() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["520840", "--login", "--transport", "websocket"])
+    assert exc_info.value.code == 2
