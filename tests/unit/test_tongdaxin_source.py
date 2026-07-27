@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from web.data_sources.factory import SOURCE_KINDS
-from web.data_sources.tongdaxin_source import TongdaxinSource
+from web.data_sources.tongdaxin_source import (
+    TongdaxinSource,
+    _is_index,
+    _parse_market,
+)
 
 
 def _rows(count: int) -> list[dict]:
@@ -52,6 +56,13 @@ class _FakeTdxApi:
 
 def test_tongdaxin_is_enabled_for_realtime_analysis() -> None:
     assert ("tongdaxin", "通达信") in SOURCE_KINDS
+
+
+def test_shenzhen_etf_market_mapping() -> None:
+    market, code = _parse_market("159170")
+
+    assert (market, code) == (0, "159170")
+    assert _is_index(market, code) is False
 
 
 def test_security_bars_are_fetched_across_multiple_pages() -> None:
@@ -123,3 +134,29 @@ def test_failed_page_reconnects_and_retries_same_offset() -> None:
     assert len(bars) == 1_500
     assert api.security_calls.count((800, 702)) == 2
     api.get_security_bars = original
+
+
+def test_empty_page_reconnects_and_retries_same_offset() -> None:
+    api = _FakeTdxApi(_rows(100))
+    source = TongdaxinSource()
+    source._api = api
+    returned_empty = False
+
+    def stale_connection_page(
+        _cat: int, _market: int, _code: str, start: int, count: int
+    ) -> list[dict] | None:
+        nonlocal returned_empty
+        api.security_calls.append((start, count))
+        if not returned_empty:
+            returned_empty = True
+            return None
+        return api._page(start, count)
+
+    api.get_security_bars = stale_connection_page
+    source.disconnect = lambda: setattr(source, "_api", None)
+    source.connect = lambda: setattr(source, "_api", api)
+
+    bars = source.fetch_bars("159170", "5m", 20, drop_forming=False)
+
+    assert len(bars) == 20
+    assert api.security_calls.count((0, 22)) == 2

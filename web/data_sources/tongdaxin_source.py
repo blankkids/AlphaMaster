@@ -166,17 +166,27 @@ class TongdaxinSource(DataSource):
         count: int,
         is_index: bool,
     ):
-        """抓取一页；连接失效时重连并只重试当前页一次。"""
+        """抓取一页；连接失效时重连并只重试当前页一次。
+
+        pytdx 在连接被服务端静默关闭后，可能返回 ``None`` / 空列表而不是抛出
+        异常。空响应因此也需要按连接失效处理；否则长期复用的单例数据源会把
+        有效证券误报为“无数据”，直到 Web 进程重启。
+        """
         try:
-            return self._fetch_raw(
+            page = self._fetch_raw(
                 cat, market, code, start, count, is_index
             )
         except Exception:
-            self.disconnect()
-            self.connect()
-            return self._fetch_raw(
-                cat, market, code, start, count, is_index
-            )
+            page = None
+
+        if page:
+            return page
+
+        self.disconnect()
+        self.connect()
+        return self._fetch_raw(
+            cat, market, code, start, count, is_index
+        )
 
     def _fetch_paged(
         self,
