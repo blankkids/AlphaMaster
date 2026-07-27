@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from download_tradingview_klines import (
+    _BROWSER_FETCH_JS,
+    _browser_context_is_authenticated,
     _extract_auth_token,
     _frame,
     default_output_path,
@@ -15,6 +17,7 @@ from download_tradingview_klines import (
     main,
     parse_user_datetime,
     prepare_dataframe,
+    replay_symbol_fallback,
     validate_training_output_path,
 )
 
@@ -28,6 +31,24 @@ def test_infer_china_exchange() -> None:
 def test_explicit_exchange_and_pro_name() -> None:
     assert infer_pro_name("aapl", "nasdaq") == "NASDAQ:AAPL"
     assert infer_pro_name("hkex:700") == "HKEX:700"
+
+
+def test_replay_symbol_uses_dly_feed() -> None:
+    assert replay_symbol_fallback("SSE:520840") == "SSE_DLY:520840"
+    assert replay_symbol_fallback("NASDAQ:AAPL") == "NASDAQ_DLY:AAPL"
+    assert replay_symbol_fallback("SSE_DLY:520840") == "SSE_DLY:520840"
+
+
+def test_browser_fetch_contains_replay_history_protocol() -> None:
+    for method in (
+        "replay_create_session",
+        "replay_get_depth",
+        "replay_reset",
+        "replay_add_series",
+        "replay_step",
+    ):
+        assert method in _BROWSER_FETCH_JS
+    assert 'message.m === "du"' in _BROWSER_FETCH_JS
 
 
 def test_date_only_end_uses_end_of_day() -> None:
@@ -110,4 +131,27 @@ def test_auth_token_prefers_environment_then_settings(
 def test_login_rejects_websocket_only_transport() -> None:
     with pytest.raises(SystemExit) as exc_info:
         main(["520840", "--login", "--transport", "websocket"])
+    assert exc_info.value.code == 2
+
+
+def test_show_browser_rejects_websocket_only_transport() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["520840", "--show-browser", "--transport", "websocket"])
+    assert exc_info.value.code == 2
+
+
+def test_browser_login_detects_tradingview_session_cookie() -> None:
+    class FakeContext:
+        pages = []
+
+        @staticmethod
+        def cookies(_url: str) -> list[dict[str, str]]:
+            return [{"name": "sessionid", "value": "signed-in"}]
+
+    assert _browser_context_is_authenticated(FakeContext()) is True
+
+
+def test_login_timeout_range_is_validated() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["520840", "--login-timeout", "10"])
     assert exc_info.value.code == 2

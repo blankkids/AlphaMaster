@@ -15,12 +15,17 @@
     # 首次打开浏览器登录；以后普通命令会自动复用登录态
     python download_tradingview_klines.py 520840 -t 5m --all --login
 
+    # 显示 Playwright 浏览器和 TradingView 图表操作过程
+    python download_tradingview_klines.py 520840 -t 5m --all --show-browser
+
 输出列固定为：
     time, open, high, low, close, tick_volume
 
 说明：
     - 默认优先使用专用 Chrome/Edge 配置中的 TradingView 登录态；首次可加
       --login 完成登录。没有登录态或认证失败时自动回退匿名连接。
+    - --all 在普通图表达到历史上限后，会为登录账户自动切换 K线回放通道，
+      从最早可用日期分批补齐并按时间戳去重。
     - 也可通过 TRADINGVIEW_AUTH_TOKEN 环境变量或 web_settings.json 中的
       tradingview_auth_token 配置登录令牌。
     - --transport websocket 可强制使用 Python WebSocket。
@@ -95,6 +100,7 @@ async (opts) => {
   const randomId = (prefix) =>
     prefix + Math.random().toString(36).slice(2, 14);
   const chartSession = randomId("cs_");
+  const replaySession = randomId("rs_");
 
   const wrap = (method, params) => {
     const payload = JSON.stringify({m: method, p: params});
@@ -124,6 +130,16 @@ async (opts) => {
     let pages = 0;
     let settled = false;
     let timer = null;
+    let phase = "normal";
+    let resolvedInfo = {};
+    let normalEarliest = null;
+    let replayDepthTurnaround = null;
+    let replayPoint = null;
+    let replayAttempted = false;
+    let replayUsed = false;
+    let replayBarsAdded = 0;
+    let replayEarliest = null;
+    let replayReason = "未请求";
 
     const finish = () => {
       if (settled) return;
@@ -131,7 +147,17 @@ async (opts) => {
       clearTimeout(timer);
       try { socket.close(); } catch (_) {}
       const output = [...bars.values()].sort((a, b) => a.time - b.time);
-      resolve({bars: output, pages});
+      resolve({
+        bars: output,
+        pages,
+        replay: {
+          attempted: replayAttempted,
+          used: replayUsed,
+          barsAdded: replayBarsAdded,
+          earliest: replayEarliest,
+          reason: replayReason,
+        },
+      });
     };
 
     const fail = (message) => {
@@ -162,20 +188,134 @@ async (opts) => {
       return eligible < opts.targetBars;
     };
 
+    const addRows = (rows) => {
+      for (const item of rows || []) {
+        const values = item.v || [];
+        if (values.length < 6) continue;
+        const ts = Number(values[0]);
+        if (!Number.isFinite(ts)) continue;
+        const timestamp = Math.trunc(ts);
+        const isNew = !bars.has(timestamp);
+        if (isNew && bars.size >= opts.maxBars) continue;
+        bars.set(timestamp, {
+          time: timestamp,
+          open: Number(values[1]),
+          high: Number(values[2]),
+          low: Number(values[3]),
+          close: Number(values[4]),
+          tick_volume: Number(values[5] || 0),
+        });
+        if (phase !== "normal" && isNew) {
+          replayBarsAdded += 1;
+        }
+      }
+    };
+
+    const send = (method, params) => socket.send(wrap(method, params));
+
+    const normalSymbol = {
+      symbol: opts.proName,
+      adjustment: opts.adjustment,
+      session: opts.session,
+    };
+
+    const replaySymbolSpec = () => {
+      const legs = Array.isArray(resolvedInfo.legs) ? resolvedInfo.legs : [];
+      const replaySymbol =
+        legs.find((value) => typeof value === "string" && value.includes(":")) ||
+        opts.replaySymbolFallback;
+      const spec = {
+        adjustment: opts.adjustment,
+        session: opts.session,
+        symbol: replaySymbol,
+      };
+      const currency = resolvedInfo.currency_id || resolvedInfo.currency_code;
+      if (currency) spec["currency-id"] = currency;
+      return spec;
+    };
+
+    const replayWrappedSymbol = () => {
+      const symbol = {...normalSymbol};
+      const currency = resolvedInfo.currency_id || resolvedInfo.currency_code;
+      if (currency) symbol["currency-id"] = currency;
+      return {replay: replaySession, symbol};
+    };
+
+    const sendReplayStep = () => {
+      if (settled || phase !== "replay") return;
+      if (bars.size >= opts.maxBars) {
+        replayReason = "达到 max-bars";
+        finish();
+        return;
+      }
+      if (
+        normalEarliest !== null &&
+        replayPoint !== null &&
+        replayPoint >= normalEarliest
+      ) {
+        replayReason = "已与普通图表历史衔接";
+        finish();
+        return;
+      }
+      const remaining = Math.max(1, opts.maxBars - bars.size);
+      const steps = Math.min(opts.replayChunkSize, remaining);
+      pages += 1;
+      armTimeout();
+      send("replay_step", [
+        replaySession,
+        randomId("rt_"),
+        steps,
+      ]);
+    };
+
+    const startReplay = () => {
+      if (
+        replayAttempted ||
+        !opts.enableReplay ||
+        opts.authToken === opts.unauthorizedToken ||
+        !bars.size ||
+        bars.size >= opts.maxBars
+      ) {
+        replayReason =
+          opts.authToken === opts.unauthorizedToken
+            ? "匿名连接无回放权限"
+            : "无需或无法启用回放";
+        finish();
+        return;
+      }
+      replayAttempted = true;
+      phase = "replay-depth";
+      normalEarliest = Math.min(...bars.keys());
+      replayDepthTurnaround = randomId("rt_");
+      armTimeout();
+      send("replay_create_session", [replaySession]);
+      send("replay_get_depth", [
+        replaySession,
+        replayDepthTurnaround,
+        "=" + JSON.stringify(replaySymbolSpec()),
+        opts.interval,
+      ]);
+    };
+
     const socket = new WebSocket(opts.wsUrl);
     const armTimeout = () => {
       clearTimeout(timer);
       timer = setTimeout(
-        () => fail(`TradingView WebSocket 超时（${opts.timeoutSeconds}s）`),
+        () => {
+          if (phase !== "normal" && bars.size) {
+            replayReason = `回放等待超时（${opts.timeoutSeconds}s）`;
+            finish();
+          } else {
+            fail(`TradingView WebSocket 超时（${opts.timeoutSeconds}s）`);
+          }
+        },
         opts.timeoutSeconds * 1000
       );
     };
     armTimeout();
 
     socket.onopen = () => {
-      const symbolSpec =
-        `={"symbol":"${opts.proName}",` +
-        `"adjustment":"${opts.adjustment}","session":"${opts.session}"}`;
+      const symbolSpec = "=" + JSON.stringify(normalSymbol);
       const messages = [
         ["set_auth_token", [opts.authToken]],
         ["chart_create_session", [chartSession, ""]],
@@ -190,7 +330,7 @@ async (opts) => {
         ["switch_timezone", [chartSession, "exchange"]],
       ];
       for (const [method, params] of messages) {
-        socket.send(wrap(method, params));
+        send(method, params);
       }
     };
 
@@ -216,47 +356,129 @@ async (opts) => {
           message.m === "critical_error" ||
           message.m === "protocol_error"
         ) {
+          if (phase !== "normal" && bars.size) {
+            replayReason = `回放协议失败：${message.m}`;
+            finish();
+            return;
+          }
           fail(`TradingView 认证、协议或品种解析失败：${opts.proName}`);
           return;
         }
 
-        if (message.m === "timescale_update") {
-          const rows = message.p?.[1]?.s1?.s || [];
-          for (const item of rows) {
-            const values = item.v || [];
-            if (values.length < 6) continue;
-            const ts = Number(values[0]);
-            if (!Number.isFinite(ts)) continue;
-            bars.set(ts, {
-              time: Math.trunc(ts),
-              open: Number(values[1]),
-              high: Number(values[2]),
-              low: Number(values[3]),
-              close: Number(values[4]),
-              tick_volume: Number(values[5] || 0),
-            });
+        if (message.m === "symbol_resolved") {
+          const rawInfo = message.p?.[2];
+          const info = Array.isArray(rawInfo) ? rawInfo[0] : rawInfo;
+          if (info && typeof info === "object") {
+            resolvedInfo = info;
           }
         }
 
+        if (message.m === "timescale_update") {
+          const rows = message.p?.[1]?.s1?.s || [];
+          addRows(rows);
+        }
+
+        if (message.m === "du") {
+          addRows(message.p?.[1]?.s1?.s || []);
+        }
+
+        if (
+          message.m === "replay_depth" &&
+          message.p?.[1] === replayDepthTurnaround
+        ) {
+          const depth = Number(message.p?.[2]);
+          if (
+            !Number.isFinite(depth) ||
+            normalEarliest === null ||
+            depth >= normalEarliest
+          ) {
+            replayReason = "回放没有更早历史";
+            finish();
+            return;
+          }
+          replayUsed = true;
+          replayEarliest = Math.trunc(depth);
+          replayPoint = replayEarliest;
+          phase = "replay-loading";
+          const resetPoint = Math.max(
+            replayEarliest,
+            opts.startTs === null ? replayEarliest : opts.startTs
+          );
+          send("replay_reset", [
+            replaySession,
+            randomId("rt_"),
+            resetPoint,
+          ]);
+          send("replay_add_series", [
+            replaySession,
+            randomId("rt_"),
+            "=" + JSON.stringify(replaySymbolSpec()),
+            opts.interval,
+          ]);
+          send("resolve_symbol", [
+            chartSession,
+            "replay_symbol_1",
+            "=" + JSON.stringify(replayWrappedSymbol()),
+          ]);
+          send("modify_series", [
+            chartSession,
+            "s1",
+            "replay_s1",
+            "replay_symbol_1",
+            opts.interval,
+            "",
+          ]);
+          armTimeout();
+        }
+
+        if (message.m === "replay_point") {
+          const point = Number(message.p?.[1]);
+          if (Number.isFinite(point)) {
+            replayPoint = Math.trunc(point);
+          }
+          sendReplayStep();
+        }
+
+        if (message.m === "replay_end_of_data") {
+          replayReason = "回放已到数据末尾";
+          finish();
+          return;
+        }
+
         if (message.m === "no_data") {
+          if (phase === "normal" && bars.size && needMore()) {
+            startReplay();
+            continue;
+          }
+          replayReason =
+            phase === "normal" ? "普通图表无数据" : "回放无更多数据";
           finish();
           return;
         }
 
         if (message.m === "series_completed") {
+          if (phase === "replay-loading") {
+            phase = "replay";
+            sendReplayStep();
+            continue;
+          }
+          if (phase !== "normal") {
+            continue;
+          }
           pages += 1;
           const noGrowth = bars.size === lastCompletedCount;
           lastCompletedCount = bars.size;
-          if (noGrowth || !needMore()) {
+          if (noGrowth) {
+            startReplay();
+          } else if (!needMore()) {
+            replayReason = "普通图表已满足范围";
             finish();
           } else {
             const remaining = Math.max(1, opts.maxBars - bars.size);
             armTimeout();
-            socket.send(
-              wrap(
-                "request_more_data",
-                [chartSession, "s1", Math.min(opts.chunkSize, remaining)]
-              )
+            send(
+              "request_more_data",
+              [chartSession, "s1", Math.min(opts.chunkSize, remaining)]
             );
           }
         }
@@ -370,6 +592,14 @@ def infer_pro_name(symbol: str, exchange: str | None = None) -> str:
         f"无法自动推断 {symbol!r} 的交易所；请使用 EXCHANGE:CODE，"
         "或添加 --exchange，例如 AAPL --exchange NASDAQ"
     )
+
+
+def replay_symbol_fallback(pro_name: str) -> str:
+    """生成 TradingView 回放深度查询使用的默认 DLY 品种名。"""
+    exchange, code = pro_name.split(":", 1)
+    if exchange.endswith("_DLY"):
+        return pro_name
+    return f"{exchange}_DLY:{code}"
 
 
 def parse_user_datetime(
@@ -591,12 +821,36 @@ def _browser_channels() -> list[tuple[str, str | None]]:
     return candidates
 
 
+def _browser_context_is_authenticated(context: Any) -> bool:
+    """判断 Playwright 浏览器上下文是否已完成 TradingView 登录。"""
+    try:
+        cookies = context.cookies("https://www.tradingview.com")
+    except Exception:
+        cookies = []
+    if any(
+        cookie.get("name") in {"sessionid", "sessionid_sign"}
+        and str(cookie.get("value") or "").strip()
+        for cookie in cookies
+    ):
+        return True
+
+    for candidate in reversed(context.pages):
+        try:
+            if candidate.evaluate("Boolean(window.is_authenticated)"):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def fetch_with_browser(
     request: DownloadRequest,
     *,
     configured_auth_token: str | None = None,
     profile_dir: str | Path | None = None,
     interactive_login: bool = False,
+    show_browser: bool = False,
+    login_timeout_seconds: int = 300,
 ) -> tuple[list[dict], int, str]:
     """优先使用登录账户，并在不可用时回退到匿名浏览器连接。"""
     try:
@@ -615,6 +869,10 @@ def fetch_with_browser(
         "maxBars": request.max_bars,
         "chunkSize": request.chunk_size,
         "initialBars": min(request.chunk_size, request.max_bars),
+        "replayChunkSize": request.chunk_size,
+        "replaySymbolFallback": replay_symbol_fallback(request.pro_name),
+        "enableReplay": request.all_history or request.start_ts is not None,
+        "unauthorizedToken": UNAUTHORIZED_USER_TOKEN,
         "timeoutSeconds": request.timeout_seconds,
         "session": request.session,
         "adjustment": request.adjustment,
@@ -632,7 +890,7 @@ def fetch_with_browser(
         context = None
         for channel, executable in _browser_channels():
             kwargs: dict[str, Any] = {
-                "headless": not interactive_login,
+                "headless": not (interactive_login or show_browser),
                 "args": ["--disable-blink-features=AutomationControlled"],
             }
             if executable:
@@ -652,6 +910,11 @@ def fetch_with_browser(
                 "无法启动 Chrome/Edge。请安装其中一个浏览器。\n"
                 + "\n".join(launch_errors[-2:])
             )
+        if interactive_login or show_browser:
+            print(
+                f"[浏览器] Playwright 已打开 {request.pro_name} 图表页面。",
+                flush=True,
+            )
 
         try:
             page = context.pages[0] if context.pages else context.new_page()
@@ -666,9 +929,12 @@ def fetch_with_browser(
                 websocket.on("framesent", capture_frame)
 
             page.on("websocket", capture_websocket)
-            page.goto(
+            chart_url = (
                 "https://www.tradingview.com/chart/?symbol="
-                + quote(request.pro_name, safe=""),
+                + quote(request.pro_name, safe="")
+            )
+            page.goto(
+                chart_url,
                 wait_until="domcontentloaded",
                 timeout=60_000,
             )
@@ -676,18 +942,59 @@ def fetch_with_browser(
 
             if interactive_login and not captured_tokens:
                 print(
-                    "[认证] 请在打开的浏览器中登录 TradingView；"
-                    "登录完成后回到终端按 Enter ...",
+                    "[认证] 正在打开 TradingView 登录页，"
+                    "请在浏览器中完成登录 ...",
                     flush=True,
                 )
                 try:
-                    input()
-                except EOFError:
-                    print("[认证] 当前终端无法交互，将使用匿名连接。")
+                    page.goto(
+                        "https://www.tradingview.com/accounts/signin/",
+                        wait_until="domcontentloaded",
+                        timeout=60_000,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[认证] 登录页打开失败，将使用匿名连接：{exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 else:
-                    captured_tokens.clear()
-                    page.reload(wait_until="domcontentloaded", timeout=60_000)
-                    page.wait_for_timeout(5_000)
+                    deadline = (
+                        time.monotonic() + max(30, login_timeout_seconds)
+                    )
+                    while (
+                        time.monotonic() < deadline
+                        and not _browser_context_is_authenticated(context)
+                    ):
+                        page.wait_for_timeout(1_000)
+
+                    if _browser_context_is_authenticated(context):
+                        print(
+                            "[认证] 已检测到登录成功，正在返回图表读取权限 ...",
+                            flush=True,
+                        )
+                        captured_tokens.clear()
+                        page.goto(
+                            chart_url,
+                            wait_until="domcontentloaded",
+                            timeout=60_000,
+                        )
+                        page.wait_for_timeout(5_000)
+                        if not captured_tokens:
+                            print(
+                                "[认证] 登录态未返回有效令牌，"
+                                "将使用匿名连接。",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                    else:
+                        print(
+                            f"[认证] 等待登录超过 "
+                            f"{max(30, login_timeout_seconds)} 秒，"
+                            "将使用匿名连接。",
+                            file=sys.stderr,
+                            flush=True,
+                        )
 
             attempts: list[tuple[str, str]] = []
             if configured_auth_token:
@@ -709,6 +1016,28 @@ def fetch_with_browser(
                 options["authToken"] = token
                 try:
                     result = page.evaluate(_BROWSER_FETCH_JS, options)
+                    replay = result.get("replay") or {}
+                    if replay.get("used"):
+                        replay_bars = int(replay.get("barsAdded") or 0)
+                        replay_earliest = int(replay.get("earliest") or 0)
+                        earliest_text = (
+                            format_timestamp(replay_earliest, "UTC")
+                            if replay_earliest
+                            else "未知"
+                        )
+                        print(
+                            f"[回放] 已启用 K线回放历史通道，"
+                            f"新增 {replay_bars:,} 根，"
+                            f"最早可用 {earliest_text}。",
+                            flush=True,
+                        )
+                    elif replay.get("attempted"):
+                        print(
+                            f"[回放] 未补充更早数据："
+                            f"{replay.get('reason') or '未知原因'}。",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     return (
                         list(result.get("bars") or []),
                         int(result.get("pages") or 0),
@@ -893,10 +1222,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="打开浏览器登录 TradingView，并保存登录态供以后自动复用",
     )
     parser.add_argument(
+        "--show-browser",
+        action="store_true",
+        help="显示 Playwright 浏览器及 TradingView 页面操作过程",
+    )
+    parser.add_argument(
+        "--login-timeout",
+        type=int,
+        default=300,
+        help="等待浏览器登录完成的秒数（默认300）",
+    )
+    parser.add_argument(
         "--profile-dir",
         help=(
             "TradingView 专用浏览器配置目录；默认使用 "
-            "%LOCALAPPDATA%/AlphaMaster/TradingViewBrowser"
+            "%%LOCALAPPDATA%%/AlphaMaster/TradingViewBrowser"
         ),
     )
     parser.add_argument(
@@ -943,8 +1283,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--chunk-size 必须在1到5000之间")
     if args.max_bars < args.bars and not args.start and not args.all:
         parser.error("--max-bars 不能小于 --bars")
-    if args.login and args.transport == "websocket":
-        parser.error("--login 需要 browser 或 auto 连接方式")
+    if not 30 <= args.login_timeout <= 1800:
+        parser.error("--login-timeout 必须在30到1800秒之间")
+    if (args.login or args.show_browser) and args.transport == "websocket":
+        parser.error("--login/--show-browser 需要 browser 或 auto 连接方式")
 
     try:
         pro_name = infer_pro_name(args.symbol, args.exchange)
@@ -993,6 +1335,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"开始       : {args.start or '按根数/全部历史决定'}")
     print(f"结束       : {args.end or '最新'}")
     print(f"连接方式   : {args.transport}")
+    if args.transport in {"auto", "browser"}:
+        browser_mode = "可视化" if args.show_browser or args.login else "无头模式"
+        print(f"Playwright : {browser_mode}")
     print("认证       : 登录账户优先，匿名连接回退")
     print(f"输出       : {output.resolve()}")
     print("=" * 68)
@@ -1019,6 +1364,8 @@ def main(argv: list[str] | None = None) -> int:
                     configured_auth_token=configured_auth_token,
                     profile_dir=args.profile_dir,
                     interactive_login=bool(args.login),
+                    show_browser=bool(args.show_browser),
+                    login_timeout_seconds=args.login_timeout,
                 )
             else:
                 websocket_attempts: list[tuple[str, str | None]] = []
@@ -1061,8 +1408,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.all and interval_seconds < 24 * 60 * 60:
         print(
-            "[范围] --all 已读取当前账户权限可访问的全部分钟线；"
-            "实际历史深度仍受 TradingView 套餐上限约束。",
+            "[范围] --all 已尝试普通图表及登录账户 K线回放通道；"
+            "最终历史深度以 TradingView 返回的最早可用日期为准。",
             flush=True,
         )
 
