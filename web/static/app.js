@@ -1828,6 +1828,13 @@ let rtServerSkew = 0; // server_time - local_now（秒）
 let rtCountdownTimer = null;
 let rtTvBlockedShownAt = 0;
 let rtTvWikiUrl = "https://my.feishu.cn/wiki/FuqnwkPwdiCLhQkPloKc7r1lntg";
+let rtMinRefreshSeconds = 1;
+let rtMaxRefreshSeconds = 30 * 24 * 60 * 60;
+const RT_REFRESH_UNIT_SECONDS = Object.freeze({
+  second: 1,
+  minute: 60,
+  hour: 60 * 60,
+});
 const RT_TV_BLOCKED_MSG =
   "当前设备无法连接 TradingView 数据服务，将无法获取以下 K 线数据：\n" +
   "  · A 股（上证 SSE、深证 SZSE）\n" +
@@ -1897,12 +1904,36 @@ function rtNumber(value, kind = "price") {
   });
 }
 
+function rtSyncRefreshRange() {
+  const input = $("rtRefreshValue");
+  const unit = $("rtRefreshUnit")?.value || "second";
+  if (!input) return;
+  const multiplier = RT_REFRESH_UNIT_SECONDS[unit] || 1;
+  input.min = "1";
+  input.max = String(Math.max(1, Math.floor(rtMaxRefreshSeconds / multiplier)));
+  if (Number(input.value) > Number(input.max)) input.value = input.max;
+}
+
+function rtReadRefreshInterval() {
+  const value = Number($("rtRefreshValue")?.value || 5);
+  const unit = $("rtRefreshUnit")?.value || "second";
+  const multiplier = RT_REFRESH_UNIT_SECONDS[unit] || 1;
+  return { value, unit, seconds: value * multiplier };
+}
+
+function rtFormatRefreshInterval(seconds) {
+  const value = Math.max(1, Math.round(Number(seconds) || 5));
+  if (value % 3600 === 0) return `${value / 3600} 小时`;
+  if (value % 60 === 0) return `${value / 60} 分钟`;
+  return `${value} 秒`;
+}
+
 function rtNowSec() {
   return Date.now() / 1000 + rtServerSkew;
 }
 
 function rtFmtCountdown(sec) {
-  const s = Math.max(0, Math.floor(sec));
+  const s = Math.max(0, Math.ceil(sec));
   if (s < 60) return `${s}秒`;
   const m = Math.floor(s / 60);
   const rs = s % 60;
@@ -1921,11 +1952,11 @@ function ensureRtCountdownTimer() {
 
 function tickRtCountdowns() {
   document.querySelectorAll(".rt-countdown").forEach((el) => {
-    if (el.dataset.session === "closed") {
-      el.textContent = "休市中";
+    if (el.dataset.evaluating === "true") {
+      el.textContent = "正在刷新数据并判断…";
       return;
     }
-    const nxt = Number(el.dataset.nextClose);
+    const nxt = Number(el.dataset.nextEvaluation);
     if (!Number.isFinite(nxt) || nxt <= 0) {
       el.textContent = "距离下次判断 —";
       return;
@@ -1935,12 +1966,12 @@ function tickRtCountdowns() {
   });
   const hintCd = $("rtNextHint");
   if (hintCd) {
-    if (hintCd.dataset.session === "closed") {
-      hintCd.textContent = "休市中";
+    if (hintCd.dataset.evaluating === "true") {
+      hintCd.textContent = "正在刷新数据并判断…";
       return;
     }
-    if (hintCd.dataset.nextClose) {
-      const nxt = Number(hintCd.dataset.nextClose);
+    if (hintCd.dataset.nextEvaluation) {
+      const nxt = Number(hintCd.dataset.nextEvaluation);
       if (Number.isFinite(nxt) && nxt > 0) {
         const left = nxt - rtNowSec();
         hintCd.textContent =
@@ -1969,11 +2000,13 @@ async function initRealtimeOnce() {
     if (data.min_exposure != null && $("rtThresholdHint")) {
       $("rtThresholdHint").textContent = `无信号阈值 |tanh(因子)| < ${data.min_exposure}`;
     }
-    const refreshInput = $("rtRefreshSeconds");
+    const refreshInput = $("rtRefreshValue");
     if (refreshInput) {
+      rtMinRefreshSeconds = Number(data.min_refresh_seconds) || 1;
+      rtMaxRefreshSeconds = Number(data.max_refresh_seconds) || 30 * 24 * 60 * 60;
       refreshInput.value = String(data.default_refresh_seconds || 5);
-      refreshInput.min = String(data.min_refresh_seconds || 1);
-      refreshInput.max = String(data.max_refresh_seconds || 3600);
+      if ($("rtRefreshUnit")) $("rtRefreshUnit").value = "second";
+      rtSyncRefreshRange();
     }
     onRtSourceChange();
   } catch (e) {
@@ -2209,7 +2242,8 @@ async function rtAddWatch() {
   const symbol = ($("rtSymbolInput")?.value || "").trim();
   const timeframe = $("rtTimeframeSelect")?.value;
   const strategy_file = $("rtStrategySelect")?.value;
-  const refresh_seconds = Number($("rtRefreshSeconds")?.value || 5);
+  const refreshInterval = rtReadRefreshInterval();
+  const refresh_seconds = refreshInterval.seconds;
   const picked = $("rtStrategyPicked");
   if (!symbol) {
     if (picked) { picked.textContent = "请填写品种"; picked.classList.add("bad"); }
@@ -2219,9 +2253,14 @@ async function rtAddWatch() {
     if (picked) { picked.textContent = "请选择或导入策略因子"; picked.classList.add("bad"); }
     return;
   }
-  if (!Number.isInteger(refresh_seconds) || refresh_seconds < 1 || refresh_seconds > 3600) {
+  if (
+    !Number.isInteger(refreshInterval.value) ||
+    refreshInterval.value < 1 ||
+    refresh_seconds < rtMinRefreshSeconds ||
+    refresh_seconds > rtMaxRefreshSeconds
+  ) {
     if (picked) {
-      picked.textContent = "刷新秒数必须是 1 到 3600 之间的整数";
+      picked.textContent = `刷新间隔必须是正整数，且不能超过 ${rtFormatRefreshInterval(rtMaxRefreshSeconds)}`;
       picked.classList.add("bad");
     }
     return;
@@ -2378,16 +2417,13 @@ async function refreshRealtime() {
     rtServerSkew = st.server_time - Date.now() / 1000;
   }
 
-  const nearest = st.nearest_seconds_to_next;
-  let nearestClose = null;
-  let anyLive = false;
-  let anyOk = false;
+  let nearestEvaluation = null;
+  let anyEvaluating = false;
   for (const w of st.watches || []) {
-    if (w.state === "ok") anyOk = true;
-    if (w.session_live && w.next_bar_close_at != null) {
-      anyLive = true;
-      if (nearestClose == null || w.next_bar_close_at < nearestClose) {
-        nearestClose = w.next_bar_close_at;
+    if (w.evaluating) anyEvaluating = true;
+    if (w.next_evaluation_at != null) {
+      if (nearestEvaluation == null || w.next_evaluation_at < nearestEvaluation) {
+        nearestEvaluation = w.next_evaluation_at;
       }
     }
   }
@@ -2397,10 +2433,10 @@ async function refreshRealtime() {
     const base = st.count
       ? `${rtEngineRunning ? "运行中" : "已暂停"} · ${st.count} 项`
       : "暂无监控项";
-    if (nearestClose) {
-      hint.innerHTML = `${base} · <span id="rtNextHint" data-next-close="${nearestClose}"></span>`;
-    } else if (anyOk && !anyLive) {
-      hint.innerHTML = `${base} · <span id="rtNextHint" data-session="closed">休市中</span>`;
+    if (anyEvaluating) {
+      hint.innerHTML = `${base} · <span id="rtNextHint" data-evaluating="true">正在刷新数据并判断…</span>`;
+    } else if (nearestEvaluation) {
+      hint.innerHTML = `${base} · <span id="rtNextHint" data-next-evaluation="${nearestEvaluation}"></span>`;
     } else {
       hint.textContent = base;
     }
@@ -2446,26 +2482,26 @@ function renderRealtimeGrid(watches) {
         w.message,
         w.last_bar_ts,
         w.updated_at,
-        w.session_live ? 1 : 0,
-        w.next_bar_close_at || "",
+        w.evaluating ? 1 : 0,
+        w.next_evaluation_at || "",
         w.refresh_seconds || 5,
       ].join("~")
     )
     .join("|");
-  // 签名未变时仍同步休市/倒计时锚点
+  // 签名未变时仍同步刷新/判断倒计时锚点
   if (sig === rtGridSig) {
     watches.forEach((w) => {
       const el = grid.querySelector(`.rt-card[data-id="${CSS.escape(w.id)}"] .rt-countdown`);
       if (!el) return;
-      if (w.session_live && w.next_bar_close_at) {
-        el.dataset.session = "";
-        el.dataset.nextClose = String(w.next_bar_close_at);
-      } else if (w.state === "ok") {
-        el.dataset.nextClose = "";
-        el.dataset.session = "closed";
+      if (w.evaluating) {
+        el.dataset.evaluating = "true";
+        el.dataset.nextEvaluation = "";
+      } else if (w.next_evaluation_at) {
+        el.dataset.evaluating = "";
+        el.dataset.nextEvaluation = String(w.next_evaluation_at);
       } else {
-        el.dataset.nextClose = "";
-        el.dataset.session = "";
+        el.dataset.evaluating = "";
+        el.dataset.nextEvaluation = "";
       }
     });
     return;
@@ -2511,22 +2547,22 @@ function renderRealtimeGrid(watches) {
       <div class="rt-meta">
         <span class="rt-meta-item">因子 <b>${factorText}</b></span>
         <span class="rt-meta-item">${escHtml(w.strategy_name)}</span>
-        <span class="rt-meta-item">刷新 ${escHtml(w.refresh_seconds || 5)} 秒</span>
+        <span class="rt-meta-item">刷新 ${escHtml(rtFormatRefreshInterval(w.refresh_seconds))}</span>
       </div>
       <div class="rt-foot">
         <span class="rt-state ${w.state}">${RT_STATE_LABEL[w.state] || w.state}</span>
         <span class="rt-time">更新 ${rtClock(w.updated_at)}</span>
         <span class="rt-countdown"${
-          w.session_live && w.next_bar_close_at
-            ? ` data-next-close="${w.next_bar_close_at}"`
-            : w.state === "ok"
-              ? ` data-session="closed"`
+          w.evaluating
+            ? ` data-evaluating="true"`
+            : w.next_evaluation_at
+              ? ` data-next-evaluation="${w.next_evaluation_at}"`
               : ""
         }>${
-          w.session_live && w.next_bar_close_at
-            ? "距离下次判断 …"
-            : w.state === "ok"
-              ? "休市中"
+          w.evaluating
+            ? "正在刷新数据并判断…"
+            : w.next_evaluation_at
+              ? "距离下次判断 …"
               : "距离下次判断 —"
         }</span>
       </div>
@@ -2675,6 +2711,7 @@ async function init() {
   // 实时分析控制
   if ($("rtSourceSelect")) $("rtSourceSelect").addEventListener("change", onRtSourceChange);
   if ($("rtStrategySelect")) $("rtStrategySelect").addEventListener("change", onRtStrategyChange);
+  if ($("rtRefreshUnit")) $("rtRefreshUnit").addEventListener("change", rtSyncRefreshRange);
   if ($("rtBrowseStrategyBtn")) $("rtBrowseStrategyBtn").addEventListener("click", rtBrowseStrategy);
   if ($("rtAddBtn")) $("rtAddBtn").addEventListener("click", rtAddWatch);
   if ($("tvBlockedMt5Btn")) $("tvBlockedMt5Btn").addEventListener("click", onTvBlockedSwitchMt5);

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from collections import deque
@@ -27,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # 每个监控项可独立设置数据刷新秒数；信号仍使用已收盘 K 线计算。
 DEFAULT_REFRESH_SECONDS = 5
 MIN_REFRESH_SECONDS = 1
-MAX_REFRESH_SECONDS = 3600
+MAX_REFRESH_SECONDS = 30 * 24 * 60 * 60
 # K 线周期长度（秒）；用于推算「下一根已收盘 bar」时间
 _TF_SECONDS = {
     "1m": 60,
@@ -173,6 +174,8 @@ class WatchTask:
     message: str = ""
     warn: str = ""
     next_due: float = 0.0
+    next_evaluation_at: float | None = None
+    evaluating: bool = False
     history: deque = field(default_factory=lambda: deque(maxlen=_HISTORY_LEN))
     data_snapshot: dict[str, Any] | None = None
 
@@ -180,6 +183,11 @@ class WatchTask:
         now = time.time()
         next_close = _next_bar_close_at(self.last_bar_ts, self.timeframe, now)
         live = next_close is not None
+        seconds_to_next = (
+            max(0, math.ceil(self.next_evaluation_at - now))
+            if self.next_evaluation_at is not None
+            else None
+        )
         return {
             "id": self.id,
             "source": self.source,
@@ -199,9 +207,9 @@ class WatchTask:
             "last_bar_ts": self.last_bar_ts,
             "session_live": live,
             "next_bar_close_at": next_close,
-            "seconds_to_next": (
-                max(0, int(next_close - now)) if next_close is not None else None
-            ),
+            "next_evaluation_at": self.next_evaluation_at,
+            "seconds_to_next": seconds_to_next,
+            "evaluating": self.evaluating,
             "updated_at": self.updated_at,
             "message": self.message,
             "tv_blocked": self.message == "TV_CONNECTIVITY_BLOCKED",
@@ -401,9 +409,19 @@ class RealtimeManager:
                 if task.id in self._inflight:
                     continue
                 self._inflight.add(task.id)
-            # 预置下次到期，避免重复提交
-            task.next_due = now + task.cadence_s
-            self._executor.submit(self._evaluate_task, task)
+            # 执行期间暂停再次调度；本轮完成后才开始计算下一次刷新间隔。
+            task.next_due = float("inf")
+            task.next_evaluation_at = None
+            task.evaluating = True
+            try:
+                self._executor.submit(self._evaluate_task, task)
+            except Exception:
+                task.next_due = time.monotonic() + task.cadence_s
+                task.next_evaluation_at = time.time() + task.cadence_s
+                task.evaluating = False
+                with self._inflight_lock:
+                    self._inflight.discard(task.id)
+                raise
 
     def _get_bars(
         self,
@@ -492,6 +510,10 @@ class RealtimeManager:
                     pass
             self._set_error(task, msg)
         finally:
+            # 严格按“刷新数据 → 判断 → 等待配置秒数”串行执行。
+            task.next_due = time.monotonic() + task.cadence_s
+            task.next_evaluation_at = time.time() + task.cadence_s
+            task.evaluating = False
             with self._inflight_lock:
                 self._inflight.discard(task.id)
 

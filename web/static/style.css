@@ -1792,7 +1792,15 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
 }
 
 .rt-field-wide { flex: 1 1 260px; }
-.rt-field-refresh { min-width: 110px; flex: 0 0 110px; }
+.rt-field-refresh { min-width: 200px; flex: 0 0 200px; }
+
+.rt-refresh-control {
+  display: flex;
+  gap: 8px;
+}
+
+.rt-refresh-control input { min-width: 0; flex: 1 1 auto; }
+.rt-refresh-control select { flex: 0 0 82px; }
 
 .rt-field select,
 .rt-field input[type="text"],

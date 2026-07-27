@@ -72,9 +72,9 @@ def test_realtime_watch_refresh_seconds_are_persisted_with_default(
     }
 
     saved = save_settings(
-        {"realtime_watches": [{**base_watch, "refresh_seconds": 12}]}
+        {"realtime_watches": [{**base_watch, "refresh_seconds": 3 * 60 * 60}]}
     )
-    assert saved["realtime_watches"][0]["refresh_seconds"] == 12
+    assert saved["realtime_watches"][0]["refresh_seconds"] == 10_800
 
     settings_path.write_text(
         json.dumps({"realtime_watches": [base_watch]}), encoding="utf-8"

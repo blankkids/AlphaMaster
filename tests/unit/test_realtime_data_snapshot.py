@@ -6,6 +6,7 @@ import pytest
 
 from web.data_sources.base import Bar
 from web.realtime_manager import (
+    MAX_REFRESH_SECONDS,
     RealtimeManager,
     WatchTask,
     _build_data_snapshot,
@@ -59,16 +60,59 @@ def test_build_data_snapshot_contains_range_and_latest_ohlcv() -> None:
 def test_realtime_refresh_seconds_default_and_validation() -> None:
     assert _normalize_refresh_seconds(None) == 5
     assert _normalize_refresh_seconds("12") == 12
+    assert _normalize_refresh_seconds(3 * 60 * 60) == 10_800
     with pytest.raises(ValueError, match="刷新秒数"):
         _normalize_refresh_seconds(0)
     with pytest.raises(ValueError, match="刷新秒数"):
-        _normalize_refresh_seconds(3601)
+        _normalize_refresh_seconds(MAX_REFRESH_SECONDS + 1)
 
 
 def test_watch_exposes_and_persists_refresh_seconds() -> None:
     task = _task()
     assert task.to_public()["refresh_seconds"] == 5
     assert task.persist_dict()["refresh_seconds"] == 5
+
+
+def test_countdown_uses_refresh_interval_instead_of_bar_close() -> None:
+    task = _task()
+    task.next_evaluation_at = 1_700_000_005.0
+
+    with patch("web.realtime_manager.time.time", return_value=1_700_000_002.0):
+        watch = task.to_public()
+
+    assert watch["next_evaluation_at"] == 1_700_000_005.0
+    assert watch["seconds_to_next"] == 3
+
+
+def test_next_refresh_is_scheduled_after_data_and_judgment_finish() -> None:
+    manager = RealtimeManager()
+    task = _task()
+    events = []
+
+    def fetch_bars(*_args):
+        events.append("refresh")
+        return _bars()
+
+    def judge(*_args):
+        events.append("judge")
+        return {
+            "state": "insufficient",
+            "bars_used": 2,
+            "message": "历史 bar 不足",
+        }
+
+    manager._get_bars = fetch_bars
+    with (
+        patch("web.realtime_manager.evaluate_signal", side_effect=judge),
+        patch("web.realtime_manager.time.monotonic", return_value=2_000.0),
+        patch("web.realtime_manager.time.time", return_value=1_000.0),
+    ):
+        manager._evaluate_task(task)
+
+    assert events == ["refresh", "judge"]
+    assert task.next_due == 2_005.0
+    assert task.next_evaluation_at == 1_005.0
+    assert task.evaluating is False
 
 
 def test_realtime_status_exposes_snapshot_even_when_history_is_insufficient() -> None:

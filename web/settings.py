@@ -30,7 +30,7 @@ _DEFAULT = {
 
 _DEFAULT_REFRESH_SECONDS = 5
 _MIN_REFRESH_SECONDS = 1
-_MAX_REFRESH_SECONDS = 3600
+_MAX_REFRESH_SECONDS = 30 * 24 * 60 * 60
 
 
 def _as_pct(value, default: float) -> float:
