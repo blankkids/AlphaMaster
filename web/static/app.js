@@ -2167,7 +2167,7 @@ async function saveRtFeishuSettings() {
       }),
     });
     if (hint) {
-      hint.textContent = "✓ 已保存，方向转折时会推送到飞书群。";
+      hint.textContent = "✓ 已保存，训练状态与方向转折会推送到飞书群。";
       hint.classList.remove("bad", "invalid");
       hint.classList.add("valid");
     }

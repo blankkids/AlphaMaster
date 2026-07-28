@@ -11,6 +11,8 @@ import json
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from web.settings import load_settings
@@ -107,6 +109,137 @@ def send_text(
     return False, f"飞书返回 code={code} msg={msg}{hint}"
 
 
+def _notification_ready() -> tuple[bool, str]:
+    settings = load_settings()
+    if not settings.get("feishu_enabled"):
+        return False, "飞书通知未启用"
+    if not (settings.get("feishu_webhook_url") or "").strip():
+        return False, "未配置 Webhook URL"
+    return True, ""
+
+
+def _format_time(value: str | None) -> str:
+    if not value:
+        return "—"
+    try:
+        return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return value
+
+
+def _format_duration(started_at: str | None, finished_at: str | None) -> str:
+    if not started_at or not finished_at:
+        return "—"
+    try:
+        seconds = max(
+            0,
+            int(
+                (
+                    datetime.fromisoformat(finished_at)
+                    - datetime.fromisoformat(started_at)
+                ).total_seconds()
+            ),
+        )
+    except (TypeError, ValueError):
+        return "—"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}小时")
+    if minutes:
+        parts.append(f"{minutes}分钟")
+    if secs or not parts:
+        parts.append(f"{secs}秒")
+    return "".join(parts)
+
+
+def _file_name(value: str) -> str:
+    return Path(value.replace("\\", "/")).name
+
+
+def notify_training_started(
+    *,
+    symbol: str,
+    timeframe: str,
+    data_file: str,
+    from_scratch: bool,
+    started_at: str | None = None,
+) -> tuple[bool, str]:
+    """训练进程成功启动后推送提醒。"""
+    ready, message = _notification_ready()
+    if not ready:
+        return False, message
+    mode = "重新训练" if from_scratch else "开始/续训"
+    text = (
+        "【AlphaMaster 训练开始】\n"
+        f"品种：{symbol} · {timeframe}\n"
+        f"方式：{mode}\n"
+        f"数据：{_file_name(data_file)}\n"
+        f"开始：{_format_time(started_at)}"
+    )
+    return send_text(text)
+
+
+def notify_training_completed(
+    *,
+    symbol: str,
+    timeframe: str,
+    data_file: str,
+    from_scratch: bool,
+    started_at: str | None,
+    finished_at: str | None,
+    log_path: str | None = None,
+) -> tuple[bool, str]:
+    """训练进程正常完成后推送提醒。"""
+    ready, message = _notification_ready()
+    if not ready:
+        return False, message
+    mode = "重新训练" if from_scratch else "开始/续训"
+    text = (
+        "【AlphaMaster 训练完成】\n"
+        f"品种：{symbol} · {timeframe}\n"
+        f"方式：{mode}\n"
+        f"数据：{_file_name(data_file)}\n"
+        f"完成：{_format_time(finished_at)}\n"
+        f"耗时：{_format_duration(started_at, finished_at)}\n"
+        f"日志：{log_path or '—'}"
+    )
+    return send_text(text)
+
+
+def notify_training_failed(
+    *,
+    symbol: str,
+    timeframe: str,
+    data_file: str,
+    from_scratch: bool,
+    started_at: str | None,
+    finished_at: str | None,
+    error: str | None,
+    exit_code: int | None = None,
+    log_path: str | None = None,
+) -> tuple[bool, str]:
+    """训练进程启动失败或异常退出后推送提醒。"""
+    ready, message = _notification_ready()
+    if not ready:
+        return False, message
+    mode = "重新训练" if from_scratch else "开始/续训"
+    exit_code_text = str(exit_code) if exit_code is not None else "未启动"
+    text = (
+        "【AlphaMaster 训练失败】\n"
+        f"品种：{symbol} · {timeframe}\n"
+        f"方式：{mode}\n"
+        f"数据：{_file_name(data_file)}\n"
+        f"失败：{_format_time(finished_at)}\n"
+        f"耗时：{_format_duration(started_at, finished_at)}\n"
+        f"退出码：{exit_code_text}\n"
+        f"原因：{error or '未知错误'}\n"
+        f"日志：{log_path or '—'}"
+    )
+    return send_text(text)
+
+
 def notify_direction_flip(
     *,
     symbol: str,
@@ -118,11 +251,9 @@ def notify_direction_flip(
     factor_value: float | None = None,
 ) -> tuple[bool, str]:
     """信号方向发生转折时推送提醒。"""
-    settings = load_settings()
-    if not settings.get("feishu_enabled"):
-        return False, "飞书通知未启用"
-    if not (settings.get("feishu_webhook_url") or "").strip():
-        return False, "未配置 Webhook URL"
+    ready, message = _notification_ready()
+    if not ready:
+        return False, message
 
     prev_cn = direction_cn(prev_direction)
     new_cn = direction_cn(new_direction)

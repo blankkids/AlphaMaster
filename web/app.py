@@ -1368,7 +1368,7 @@ def api_realtime_feishu_test(req: FeishuTestRequest) -> dict[str, Any]:
     if secret is None:
         secret = load_settings().get("feishu_secret") or ""
     ok, msg = send_text(
-        "✅ AlphaMaster 飞书通知测试：配置正常。信号方向转折时会推送提醒。",
+        "✅ AlphaMaster 飞书通知测试：配置正常。训练开始、完成、失败及信号方向转折时会推送提醒。",
         webhook_url=url,
         secret=secret or "",
     )

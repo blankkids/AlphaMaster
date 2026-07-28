@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -36,6 +35,7 @@ class TrainingJob:
     symbol: str
     timeframe: str
     mode: str
+    from_scratch: bool = False
     state: JobState = JobState.RUNNING
     pid: int | None = None
     log_path: str = ""
@@ -50,6 +50,7 @@ class TrainingJob:
             "symbol": self.symbol,
             "timeframe": self.timeframe,
             "mode": self.mode,
+            "from_scratch": self.from_scratch,
             "state": self.state.value,
             "pid": self.pid,
             "log_path": self.log_path,
@@ -58,6 +59,59 @@ class TrainingJob:
             "exit_code": self.exit_code,
             "error": self.error,
         }
+
+
+def _send_training_notification(event: str, job: TrainingJob) -> None:
+    try:
+        from web.feishu_notify import (
+            notify_training_completed,
+            notify_training_failed,
+            notify_training_started,
+        )
+
+        common = {
+            "symbol": job.symbol,
+            "timeframe": job.timeframe,
+            "data_file": job.data_file,
+            "from_scratch": job.from_scratch,
+        }
+        if event == "started":
+            notify_training_started(
+                **common,
+                started_at=job.started_at,
+            )
+        elif event == "completed":
+            notify_training_completed(
+                **common,
+                started_at=job.started_at,
+                finished_at=job.finished_at,
+                log_path=job.log_path,
+            )
+        elif event == "failed":
+            notify_training_failed(
+                **common,
+                started_at=job.started_at,
+                finished_at=job.finished_at,
+                error=job.error,
+                exit_code=job.exit_code,
+                log_path=job.log_path,
+            )
+    except Exception:
+        # 通知是旁路能力，任何飞书异常都不能影响训练主流程。
+        pass
+
+
+def _dispatch_training_notification(event: str, job: TrainingJob) -> None:
+    try:
+        snapshot = replace(job)
+        threading.Thread(
+            target=_send_training_notification,
+            args=(event, snapshot),
+            name=f"feishu-training-{event}",
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
 
 
 class TrainingManager:
@@ -123,24 +177,43 @@ class TrainingManager:
             if sys.platform == "win32":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
-            self._stopped_by_user = False
-            self._proc = subprocess.Popen(
-                cmd,
-                cwd=PROJECT_ROOT,
-                stdout=self._log_fp,
-                stderr=subprocess.STDOUT,
-                env=env,
-                creationflags=creationflags,
-            )
+            started_at = datetime.now(timezone.utc).isoformat()
             self._job = TrainingJob(
                 data_file=data_file,
                 symbol=symbol,
                 timeframe=timeframe,
                 mode=mode,
-                pid=self._proc.pid,
+                from_scratch=from_scratch,
                 log_path=str(log_path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
-                started_at=datetime.now(timezone.utc).isoformat(),
+                started_at=started_at,
             )
+            self._stopped_by_user = False
+            try:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    cwd=PROJECT_ROOT,
+                    stdout=self._log_fp,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    creationflags=creationflags,
+                )
+                self._job.pid = self._proc.pid
+            except Exception as exc:
+                self._job.state = JobState.FAILED
+                self._job.finished_at = datetime.now(timezone.utc).isoformat()
+                self._job.error = f"训练进程启动失败: {exc}"
+                if self._log_fp:
+                    try:
+                        self._log_fp.write(f"\n[Web] {self._job.error}\n")
+                        self._log_fp.close()
+                    except Exception:
+                        pass
+                    self._log_fp = None
+                self._proc = None
+                _dispatch_training_notification("failed", self._job)
+                raise
+            _dispatch_training_notification("started", self._job)
+            self._start_process_watcher(self._proc)
             return self._job
 
     def stop(self) -> bool:
@@ -153,6 +226,23 @@ class TrainingManager:
             except Exception:
                 self._proc.kill()
             return True
+
+    def _start_process_watcher(self, process: subprocess.Popen) -> None:
+        threading.Thread(
+            target=self._watch_process,
+            args=(process,),
+            name=f"training-watcher-{process.pid}",
+            daemon=True,
+        ).start()
+
+    def _watch_process(self, process: subprocess.Popen) -> None:
+        try:
+            process.wait()
+        except Exception:
+            return
+        with self._lock:
+            if self._proc is process:
+                self._refresh_state()
 
     def parse_step_from_log(self) -> int | None:
         """从日志尾部解析当前步数，用于 checkpoint 写入前的进度展示。"""
@@ -190,8 +280,6 @@ class TrainingManager:
                 self._job.state = JobState.STOPPED
             elif code == 0:
                 self._job.state = JobState.COMPLETED
-            elif code in (-signal.SIGTERM, 1) and sys.platform != "win32":
-                self._job.state = JobState.STOPPED
             elif code < 0:
                 self._job.state = JobState.STOPPED
             else:
@@ -213,6 +301,10 @@ class TrainingManager:
                 pass
             self._log_fp = None
         self._record_session_time()
+        if self._job.state == JobState.COMPLETED:
+            _dispatch_training_notification("completed", self._job)
+        elif self._job.state == JobState.FAILED:
+            _dispatch_training_notification("failed", self._job)
         self._proc = None
 
     def _record_session_time(self) -> None:

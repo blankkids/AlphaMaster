@@ -554,9 +554,9 @@
       <section class="panel rt-feishu-panel">
         <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
         <span class="hud-corner bl"></span><span class="hud-corner br"></span>
-        <h2>飞书转折提醒</h2>
+        <h2>飞书通知</h2>
         <p class="rt-feishu-desc">
-          仅在信号方向发生变化时推送文字提醒（例如看涨 → 不确定 / 看跌）。
+          模型训练开始、完成、失败，以及信号方向发生变化时推送文字提醒。
           在飞书群添加自定义机器人后，把 Webhook 地址填到下面。
         </p>
         <div class="rt-feishu-form">
@@ -578,7 +578,7 @@
             <button type="button" class="btn btn-feishu-help" id="rtFeishuHelpBtn">怎么使用飞书功能</button>
           </div>
         </div>
-        <small class="field-hint" id="rtFeishuHint">保存后，监控项方向转折时会自动推送到飞书群。</small>
+        <small class="field-hint" id="rtFeishuHint">保存后，训练状态与监控项方向转折会自动推送到飞书群。</small>
       </section>
     </div><!-- /page-realtime -->
 
@@ -625,6 +625,6 @@
   </div>
 
   <script src="/static/bg.js?v=1"></script>
-  <script src="/static/app.js?v=62"></script>
+  <script src="/static/app.js?v=63"></script>
 </body>
 </html>
