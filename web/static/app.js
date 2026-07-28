@@ -215,6 +215,11 @@ async function fetchJSON(path, opts = {}) {
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      if (res.status === 401) {
+        const next = encodeURIComponent(window.location.pathname + window.location.search);
+        window.location.replace(`/login?next=${next}`);
+        throw new Error("登录已失效，正在跳转登录页");
+      }
       const msg = formatApiError(data, res.status, path);
       await logClientError(`${path} -> ${msg}`, { path, status: res.status, silent });
       if (!silent) await refreshDebugLogs();
@@ -2761,6 +2766,16 @@ function startPolling() {
   }, 1000);
 }
 
+async function logout() {
+  const button = $("logoutButton");
+  if (button) button.disabled = true;
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } finally {
+    window.location.replace("/login");
+  }
+}
+
 async function init() {
   try {
     await loadConfig();
@@ -2779,6 +2794,7 @@ async function init() {
   $("importTrainingBtn").addEventListener("click", triggerImportTraining);
   $("importTrainingFile").addEventListener("change", handleImportTrainingFile);
   $("debugModeCheck").addEventListener("change", (e) => setDebugMode(e.target.checked));
+  $("logoutButton")?.addEventListener("click", logout);
   if ($("aiApiKeyInput")) {
     $("aiApiKeyInput").addEventListener("input", updateAiChannelHint);
     $("aiApiKeyInput").addEventListener("change", updateAiChannelHint);

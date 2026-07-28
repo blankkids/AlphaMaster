@@ -224,6 +224,23 @@ body {
   accent-color: var(--accent);
 }
 
+.logout-button {
+  padding: 7px 12px;
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: 9px;
+  color: var(--text-muted);
+  background: rgba(18, 25, 37, 0.62);
+  cursor: pointer;
+  font: 600 0.78rem/1.2 var(--sans);
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.logout-button:hover {
+  color: var(--text);
+  border-color: rgba(94, 234, 212, 0.48);
+  background: rgba(45, 212, 191, 0.1);
+}
+
 .hidden { display: none !important; }
 
 /* ================================ Pill ================================ */

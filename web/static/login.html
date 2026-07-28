@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>登录 · AlphaMaster</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #071017;
+      --panel: rgba(12, 25, 34, 0.88);
+      --border: rgba(111, 226, 211, 0.2);
+      --accent: #5eead4;
+      --accent-strong: #2dd4bf;
+      --text: #e8fffb;
+      --muted: #89a5aa;
+      --danger: #fb7185;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 16% 20%, rgba(45, 212, 191, 0.16), transparent 30%),
+        radial-gradient(circle at 82% 74%, rgba(56, 189, 248, 0.12), transparent 34%),
+        var(--bg);
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      opacity: 0.28;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(94, 234, 212, 0.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(94, 234, 212, 0.06) 1px, transparent 1px);
+      background-size: 46px 46px;
+      mask-image: linear-gradient(to bottom, transparent, black 22%, black 78%, transparent);
+    }
+    .shell {
+      position: relative;
+      z-index: 1;
+      width: min(92vw, 440px);
+    }
+    .identity {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+    .mark {
+      position: relative;
+      width: 58px;
+      height: 58px;
+      display: grid;
+      place-items: center;
+      border-radius: 18px;
+      color: #041114;
+      background: linear-gradient(135deg, #99f6e4, #2dd4bf 55%, #0f766e);
+      box-shadow: 0 10px 36px rgba(45, 212, 191, 0.28);
+      font: 800 31px/1 Georgia, serif;
+    }
+    .mark::after {
+      content: "";
+      position: absolute;
+      inset: -6px;
+      border: 1px solid rgba(94, 234, 212, 0.34);
+      border-radius: 23px;
+    }
+    .identity h1 {
+      margin: 0 0 5px;
+      font-size: 1.45rem;
+      letter-spacing: 0.06em;
+    }
+    .identity p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+    .card {
+      padding: 32px;
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      background: var(--panel);
+      box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
+      backdrop-filter: blur(18px);
+    }
+    .card h2 {
+      margin: 0 0 8px;
+      font-size: 1.28rem;
+    }
+    .lead {
+      margin: 0 0 26px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+    label {
+      display: block;
+      margin: 0 0 17px;
+      color: #c7dedf;
+      font-size: 0.84rem;
+      font-weight: 600;
+    }
+    input {
+      width: 100%;
+      margin-top: 8px;
+      padding: 13px 14px;
+      border: 1px solid rgba(130, 173, 177, 0.24);
+      border-radius: 11px;
+      outline: none;
+      color: var(--text);
+      background: rgba(3, 12, 18, 0.68);
+      font: inherit;
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+    input:focus {
+      border-color: var(--accent-strong);
+      box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.12);
+    }
+    button {
+      width: 100%;
+      margin-top: 4px;
+      padding: 13px 18px;
+      border: 0;
+      border-radius: 11px;
+      cursor: pointer;
+      color: #031315;
+      background: linear-gradient(120deg, #99f6e4, var(--accent-strong));
+      box-shadow: 0 9px 28px rgba(45, 212, 191, 0.18);
+      font: 700 0.95rem/1.2 inherit;
+      transition: transform 160ms ease, opacity 160ms ease;
+    }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:disabled { cursor: wait; opacity: 0.62; }
+    .message {
+      display: none;
+      margin: 18px 0 0;
+      padding: 11px 13px;
+      border-radius: 10px;
+      color: #fecdd3;
+      background: rgba(244, 63, 94, 0.1);
+      border: 1px solid rgba(251, 113, 133, 0.23);
+      font-size: 0.84rem;
+      line-height: 1.55;
+      white-space: pre-line;
+    }
+    .message.show { display: block; }
+    .footnote {
+      margin: 18px 0 0;
+      text-align: center;
+      color: #628086;
+      font-size: 0.76rem;
+      letter-spacing: 0.02em;
+    }
+    @media (max-width: 520px) {
+      .card { padding: 26px 22px; }
+      .identity { padding: 0 4px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="identity">
+      <div class="mark" aria-hidden="true">α</div>
+      <div>
+        <h1>AlphaMaster</h1>
+        <p>量化因子挖掘中心</p>
+      </div>
+    </div>
+    <section class="card" aria-labelledby="loginTitle">
+      <h2 id="loginTitle">账户登录</h2>
+      <p class="lead">请输入访问凭据，登录后才能进入训练与策略管理界面。</p>
+      <form id="loginForm">
+        <label>
+          账户
+          <input id="username" name="username" type="text" autocomplete="username" required autofocus />
+        </label>
+        <label>
+          密码
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button id="submitButton" type="submit">安全登录</button>
+        <p class="message" id="message" role="alert"></p>
+      </form>
+    </section>
+    <p class="footnote">本地签名会话 · 凭据不会保存在浏览器脚本中</p>
+  </main>
+  <script>
+    const form = document.getElementById("loginForm");
+    const usernameInput = document.getElementById("username");
+    const passwordInput = document.getElementById("password");
+    const submitButton = document.getElementById("submitButton");
+    const message = document.getElementById("message");
+
+    function destination() {
+      const next = new URLSearchParams(window.location.search).get("next");
+      return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+    }
+
+    function showMessage(text) {
+      message.textContent = text;
+      message.classList.toggle("show", Boolean(text));
+    }
+
+    async function loadStatus() {
+      try {
+        const response = await fetch("/api/auth/status", { cache: "no-store" });
+        const status = await response.json();
+        if (status.authenticated) {
+          window.location.replace(destination());
+          return;
+        }
+        if (!status.configured) {
+          showMessage(
+            "管理员尚未配置登录密码。\n请在项目 .env 中设置 WEB_AUTH_PASSWORD，然后重启服务。"
+          );
+          submitButton.disabled = true;
+          return;
+        }
+        usernameInput.value = status.username || status.login_username || "admin";
+      } catch (_) {
+        showMessage("暂时无法连接服务，请稍后刷新重试。");
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      showMessage("");
+      submitButton.disabled = true;
+      submitButton.textContent = "正在验证…";
+      try {
+        const response = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: usernameInput.value,
+            password: passwordInput.value,
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.detail || "登录失败，请检查账户和密码");
+        }
+        window.location.replace(destination());
+      } catch (error) {
+        showMessage(error.message || "登录失败，请稍后重试");
+        passwordInput.select();
+      } finally {
+        submitButton.disabled = false;
+        submitButton.textContent = "安全登录";
+      }
+    });
+
+    loadStatus();
+  </script>
+</body>
+</html>

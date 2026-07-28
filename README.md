@@ -28,10 +28,16 @@ AlphaMaster 把「挖因子」做成一条可操作的流水线：
 
 ```bash
 pip install -r requirements.txt
+copy .env.example .env
+# 编辑 .env，至少设置 WEB_AUTH_PASSWORD
 python run_web.py --port 8765
 ```
 
-浏览器打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。界面分三步：
+浏览器打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，使用 `.env`
+中的 `WEB_AUTH_USERNAME`（默认 `admin`）和 `WEB_AUTH_PASSWORD` 登录。
+未配置密码时 Web 控制台会拒绝访问。登录状态默认保持 12 小时，可通过
+`WEB_AUTH_SESSION_HOURS` 调整；HTTPS 部署时应设置
+`WEB_AUTH_COOKIE_SECURE=true`。界面分三步：
 
 | 步骤 | 作用 |
 |------|------|

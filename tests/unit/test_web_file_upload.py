@@ -5,14 +5,29 @@ from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 import web.app as web_app
 
 
+@pytest.fixture
+def client(monkeypatch) -> TestClient:
+    monkeypatch.setenv("WEB_AUTH_USERNAME", "test-user")
+    monkeypatch.setenv("WEB_AUTH_PASSWORD", "test-password")
+    test_client = TestClient(web_app.app)
+    response = test_client.post(
+        "/api/auth/login",
+        json={"username": "test-user", "password": "test-password"},
+    )
+    assert response.status_code == 200
+    return test_client
+
+
 def test_browser_uploads_training_parquet(
     tmp_path,
     monkeypatch,
+    client,
 ) -> None:
     upload_root = tmp_path / "data"
     monkeypatch.setattr(web_app, "DATA_UPLOAD_DIR", upload_root)
@@ -30,7 +45,6 @@ def test_browser_uploads_training_parquet(
         }
     ).to_parquet(parquet, index=False)
 
-    client = TestClient(web_app.app)
     response = client.post(
         "/api/data-file/upload",
         files={
@@ -66,12 +80,12 @@ def test_browser_uploads_training_parquet(
 def test_browser_uploads_strategy_json(
     tmp_path,
     monkeypatch,
+    client,
 ) -> None:
     upload_root = tmp_path / "strategies"
     monkeypatch.setattr(web_app, "STRATEGY_UPLOAD_DIR", upload_root)
     monkeypatch.setattr(web_app, "save_settings", lambda payload: payload)
 
-    client = TestClient(web_app.app)
     response = client.post(
         "/api/strategy-file/upload",
         files={
@@ -99,11 +113,11 @@ def test_browser_uploads_strategy_json(
 def test_browser_upload_rejects_wrong_extension(
     tmp_path,
     monkeypatch,
+    client,
 ) -> None:
     monkeypatch.setattr(web_app, "DATA_UPLOAD_DIR", tmp_path / "data")
     monkeypatch.setattr(web_app, "save_settings", lambda payload: payload)
 
-    client = TestClient(web_app.app)
     response = client.post(
         "/api/data-file/upload",
         files={"file": ("not-parquet.txt", b"bad", "text/plain")},

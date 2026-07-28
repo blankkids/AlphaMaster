@@ -9,10 +9,11 @@ import traceback
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -22,6 +23,16 @@ if str(ROOT) not in sys.path:
 
 from data_pipeline.parquet_manager import inspect_parquet_file, parse_parquet_filename
 from model_core.config import ModelConfig
+from web.auth import (
+    SESSION_COOKIE,
+    auth_configured,
+    auth_username,
+    authenticate,
+    cookie_secure,
+    create_session_token,
+    session_max_age,
+    verify_session_token,
+)
 from web.file_dialog import pick_parquet_file, pick_strategy_file
 from web.progress import (
     get_symbol_progress,
@@ -78,6 +89,11 @@ app.add_middleware(
 class StartTrainingRequest(BaseModel):
     data_file: str
     from_scratch: bool = False
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 class DataFileRequest(BaseModel):
@@ -139,11 +155,37 @@ class FeishuTestRequest(BaseModel):
     secret: str | None = None
 
 
+PUBLIC_PATHS = {
+    "/login",
+    "/api/auth/login",
+    "/api/auth/status",
+    "/api/health",
+}
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     started = time.perf_counter()
     try:
-        response = await call_next(request)
+        path = request.url.path
+        username = verify_session_token(request.cookies.get(SESSION_COOKIE))
+        if path not in PUBLIC_PATHS and username is None:
+            if path.startswith("/api/"):
+                detail = (
+                    "Web 登录密码尚未配置，请先设置 WEB_AUTH_PASSWORD"
+                    if not auth_configured()
+                    else "登录已失效，请重新登录"
+                )
+                response = JSONResponse(status_code=401, content={"detail": detail})
+            else:
+                requested_url = path
+                if request.url.query:
+                    requested_url += f"?{request.url.query}"
+                login_url = f"/login?next={quote(requested_url, safe='')}"
+                response = RedirectResponse(url=login_url, status_code=303)
+        else:
+            request.state.auth_username = username
+            response = await call_next(request)
     except Exception as exc:
         log_error(f"{request.method} {request.url.path} unhandled", exc)
         raise
@@ -158,6 +200,61 @@ async def log_requests(request: Request, call_next):
         )
     if response.status_code >= 400:
         log_error(f"{request.method} {request.url.path} -> HTTP {response.status_code}")
+    return response
+
+
+@app.get("/login")
+def login_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "login.html")
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request) -> dict[str, Any]:
+    username = verify_session_token(request.cookies.get(SESSION_COOKIE))
+    return {
+        "configured": auth_configured(),
+        "authenticated": username is not None,
+        "username": username,
+        "login_username": auth_username(),
+    }
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginRequest) -> JSONResponse:
+    if not auth_configured():
+        raise HTTPException(
+            503,
+            "Web 登录密码尚未配置，请在 .env 中设置 WEB_AUTH_PASSWORD 后重启服务",
+        )
+    if not authenticate(payload.username, payload.password):
+        raise HTTPException(401, "账户或密码错误")
+    response = JSONResponse(
+        content={"ok": True, "username": auth_username()},
+    )
+    max_age = session_max_age()
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=create_session_token(auth_username()),
+        max_age=max_age,
+        expires=max_age,
+        path="/",
+        secure=cookie_secure(),
+        httponly=True,
+        samesite="strict",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout() -> JSONResponse:
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie(
+        key=SESSION_COOKIE,
+        path="/",
+        secure=cookie_secure(),
+        httponly=True,
+        samesite="strict",
+    )
     return response
 
 
