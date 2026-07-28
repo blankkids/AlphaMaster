@@ -29,7 +29,6 @@ _DEFAULT = {
     "tqsdk_password": "ghhkphs8",
 }
 
-_MAX_RECENT_DATA_FILES = 20
 _DEFAULT_REFRESH_SECONDS = 5
 _MIN_REFRESH_SECONDS = 1
 _MAX_REFRESH_SECONDS = 30 * 24 * 60 * 60
@@ -99,8 +98,6 @@ def _clean_recent_data_files(values) -> list[str]:
             continue
         seen.add(key)
         cleaned.append(normalized)
-        if len(cleaned) >= _MAX_RECENT_DATA_FILES:
-            break
     return cleaned
 
 

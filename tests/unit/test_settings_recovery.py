@@ -81,6 +81,24 @@ def test_recent_data_files_are_persisted_in_mru_order(
     assert load_settings()["recent_data_files"] == saved["recent_data_files"]
 
 
+def test_recent_data_files_have_no_count_limit(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = project / "web_settings.json"
+    monkeypatch.setattr(settings_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(settings_mod, "PROJECT_ROOT", project)
+    monkeypatch.setattr(settings_mod, "_is_production_settings_path", lambda: False)
+    files = [project / f"SYMBOL{i:02d}_H1.parquet" for i in range(25)]
+
+    for path in files:
+        path.write_bytes(b"PAR1")
+        save_settings({"last_data_file": str(path)})
+
+    saved = load_settings()["recent_data_files"]
+    assert len(saved) == 25
+    assert saved == [str(path.resolve()) for path in reversed(files)]
+
+
 def test_realtime_watch_refresh_seconds_are_persisted_with_default(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

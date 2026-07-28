@@ -188,7 +188,7 @@ def _inspect_or_http(path: str) -> dict[str, Any]:
         raise HTTPException(400, str(e)) from e
 
 
-def _list_historical_data_files(limit: int = 30) -> list[dict[str, Any]]:
+def _list_historical_data_files() -> list[dict[str, Any]]:
     """Return lightweight metadata for reusable training data files."""
     settings = load_settings()
     candidates: list[str] = []
@@ -249,8 +249,6 @@ def _list_historical_data_files(limit: int = 30) -> list[dict[str, Any]]:
                 "modified_at": stat.st_mtime,
             }
         )
-        if len(rows) >= limit:
-            break
     return rows
 
 
