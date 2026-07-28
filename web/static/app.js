@@ -283,6 +283,76 @@ function renderDataFileCard(info) {
   if ($("retrainBtn")) $("retrainBtn").disabled = false;
 }
 
+function formatFileSize(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`;
+  return `${(value / (1024 * 1024)).toFixed(value >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
+}
+
+function updateHistoryDataSelect(active = false) {
+  const select = $("historyDataSelect");
+  if (!select) return;
+  select.disabled = active || select.options.length <= 1;
+}
+
+async function refreshDataFileHistory(preferredPath = selectedDataFile) {
+  const select = $("historyDataSelect");
+  if (!select) return;
+
+  const preferredKey = String(preferredPath || "").replaceAll("\\", "/").toLowerCase();
+  try {
+    const response = await fetchJSON("/api/data-files/history", { silent: true });
+    const rows = response.data_files || [];
+    select.replaceChildren();
+
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = rows.length ? "选择已保存的数据…" : "暂无历史数据";
+    select.appendChild(placeholder);
+
+    for (const row of rows) {
+      const option = document.createElement("option");
+      option.value = row.data_file;
+      const size = formatFileSize(row.size_bytes);
+      option.textContent = `${row.symbol} · ${row.timeframe} · ${row.filename}${size ? ` · ${size}` : ""}`;
+      option.title = row.data_file;
+      if (row.data_file.replaceAll("\\", "/").toLowerCase() === preferredKey) {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    }
+    updateHistoryDataSelect(false);
+  } catch (_) {
+    select.replaceChildren(new Option("历史数据加载失败", ""));
+    select.disabled = true;
+  }
+}
+
+async function selectHistoricalDataFile(event) {
+  const select = event.target;
+  const dataFile = select.value;
+  if (!dataFile) return;
+
+  select.disabled = true;
+  try {
+    const res = await fetchJSON("/api/data-file/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data_file: dataFile }),
+    });
+    renderDataFileCard(res);
+    selectedSymbol = res.symbol || null;
+    await refreshDataFileHistory(res.data_file);
+    await refreshOverview();
+  } catch (e) {
+    select.value = selectedDataFile || "";
+    $("debugView")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } finally {
+    updateHistoryDataSelect(false);
+  }
+}
+
 function updateBtStartBtn() {
   const startBtn = $("btStartBtn");
   if (!startBtn) return;
@@ -613,6 +683,7 @@ function updateTrainingUI(training, progress) {
     startBtn.disabled = !selectedDataFile;
     if (retrainBtn) retrainBtn.disabled = !selectedDataFile;
     stopBtn.disabled = true;
+    updateHistoryDataSelect(false);
     $("logHint").textContent = "—";
     updateTrainingTimeFields(progress, training);
     return;
@@ -632,6 +703,7 @@ function updateTrainingUI(training, progress) {
   startBtn.disabled = active;
   if (retrainBtn) retrainBtn.disabled = active;
   stopBtn.disabled = !active;
+  updateHistoryDataSelect(active);
   $("logHint").textContent = job.log_path || "—";
   updateTrainingTimeFields(progress, training);
 
@@ -697,6 +769,7 @@ async function loadConfig() {
     $("debugLogPaths").textContent = `本地: ${cfg.error_log}`;
   }
   if (cfg.data_file) renderDataFileCard(cfg.data_file);
+  await refreshDataFileHistory(cfg.data_file?.data_file || cfg.last_data_file);
   if (cfg.strategy_file) renderStrategyFileCard(cfg.strategy_file);
   applyBacktestCostDefaults(cfg);
   await initAiPanel(cfg);
@@ -980,6 +1053,7 @@ async function handleDataFileUpload(event) {
     });
     renderDataFileCard(res);
     selectedSymbol = res.symbol;
+    await refreshDataFileHistory(res.data_file);
     await loadSymbolChart(res.symbol);
   } catch (e) {
     $("debugView").scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -2696,6 +2770,7 @@ async function init() {
   }
   $("browseBtn").addEventListener("click", browseDataFile);
   $("dataFileInput").addEventListener("change", handleDataFileUpload);
+  $("historyDataSelect")?.addEventListener("change", selectHistoricalDataFile);
   $("startBtn").addEventListener("click", startTraining);
   if ($("retrainBtn")) $("retrainBtn").addEventListener("click", retrainFromScratch);
   $("stopBtn").addEventListener("click", stopTraining);

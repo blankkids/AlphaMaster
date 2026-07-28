@@ -50,6 +50,18 @@ def test_browser_uploads_training_parquet(
     assert payload["bars"] == 3000
     assert upload_root in Path(payload["data_file"]).parents
 
+    history_response = client.get("/api/data-files/history")
+    assert history_response.status_code == 200
+    history = history_response.json()["data_files"]
+    assert payload["data_file"] in [row["data_file"] for row in history]
+
+    select_response = client.post(
+        "/api/data-file/select",
+        json={"data_file": payload["data_file"]},
+    )
+    assert select_response.status_code == 200
+    assert select_response.json()["symbol"] == "REMOTE"
+
 
 def test_browser_uploads_strategy_json(
     tmp_path,

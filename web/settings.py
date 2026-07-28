@@ -10,6 +10,7 @@ STRATEGIES_DIR = PROJECT_ROOT / "strategies"
 
 _DEFAULT = {
     "last_data_file": "",
+    "recent_data_files": [],
     "last_strategy_file": "",
     "debug_mode": False,
     "ai_provider": "deepseek",
@@ -28,6 +29,7 @@ _DEFAULT = {
     "tqsdk_password": "ghhkphs8",
 }
 
+_MAX_RECENT_DATA_FILES = 20
 _DEFAULT_REFRESH_SECONDS = 5
 _MIN_REFRESH_SECONDS = 1
 _MAX_REFRESH_SECONDS = 30 * 24 * 60 * 60
@@ -75,6 +77,31 @@ def _is_production_settings_path() -> bool:
 def _is_usable_data_file(path: str) -> bool:
     p = Path(str(path or "").strip())
     return p.is_file() and p.suffix.lower() == ".parquet"
+
+
+def _clean_recent_data_files(values) -> list[str]:
+    """Normalize and de-duplicate recently selected Parquet paths."""
+    if not isinstance(values, (list, tuple)):
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        raw = str(value or "").strip()
+        if not raw or Path(raw).suffix.lower() != ".parquet":
+            continue
+        if _is_ephemeral_data_path(raw) and _is_production_settings_path():
+            continue
+        path = Path(raw)
+        normalized = str(path.resolve()) if path.is_file() else raw
+        key = normalized.replace("\\", "/").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(normalized)
+        if len(cleaned) >= _MAX_RECENT_DATA_FILES:
+            break
+    return cleaned
 
 
 def _should_replace_last_data_file(path: str) -> bool:
@@ -138,6 +165,8 @@ def load_settings() -> dict:
     out["bt_slippage_pct"] = _as_pct(
         out.get("bt_slippage_pct"), _DEFAULT["bt_slippage_pct"]
     )
+    original_recent = out.get("recent_data_files")
+    out["recent_data_files"] = _clean_recent_data_files(original_recent)
     watches = out.get("realtime_watches")
     if not isinstance(watches, list):
         watches = []
@@ -166,15 +195,18 @@ def load_settings() -> dict:
     out["tqsdk_user"] = str(out.get("tqsdk_user") or "").strip()
     out["tqsdk_password"] = str(out.get("tqsdk_password") or "").strip()
     recovered = _recover_last_data_file(out)
-    if recovered != out.get("last_data_file") and _is_production_settings_path():
-        out["last_data_file"] = recovered
-        if recovered:
-            SETTINGS_PATH.write_text(
-                json.dumps(out, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-    elif recovered != out.get("last_data_file"):
-        out["last_data_file"] = recovered
+    recovered_changed = recovered != out.get("last_data_file")
+    out["last_data_file"] = recovered
+    if recovered:
+        out["recent_data_files"] = _clean_recent_data_files(
+            [recovered, *out["recent_data_files"]]
+        )
+    recent_changed = out["recent_data_files"] != original_recent
+    if (recovered_changed or recent_changed) and _is_production_settings_path():
+        SETTINGS_PATH.write_text(
+            json.dumps(out, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
     return out
 
 
@@ -190,6 +222,10 @@ def save_settings(data: dict) -> dict:
             data = {k: v for k, v in data.items() if k != "last_data_file"}
         else:
             current["last_data_file"] = path
+            if path:
+                current["recent_data_files"] = _clean_recent_data_files(
+                    [path, *current.get("recent_data_files", [])]
+                )
     if "last_strategy_file" in data:
         current["last_strategy_file"] = str(data["last_strategy_file"] or "").strip()
     if "debug_mode" in data:

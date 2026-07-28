@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data_pipeline.parquet_manager import inspect_parquet_file
+from data_pipeline.parquet_manager import inspect_parquet_file, parse_parquet_filename
 from model_core.config import ModelConfig
 from web.file_dialog import pick_parquet_file, pick_strategy_file
 from web.progress import (
@@ -78,6 +78,10 @@ app.add_middleware(
 class StartTrainingRequest(BaseModel):
     data_file: str
     from_scratch: bool = False
+
+
+class DataFileRequest(BaseModel):
+    data_file: str
 
 
 class ClientLogRequest(BaseModel):
@@ -182,6 +186,72 @@ def _inspect_or_http(path: str) -> dict[str, Any]:
         raise HTTPException(404, str(e)) from e
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+
+
+def _list_historical_data_files(limit: int = 30) -> list[dict[str, Any]]:
+    """Return lightweight metadata for reusable training data files."""
+    settings = load_settings()
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(path: str | Path | None) -> None:
+        raw = str(path or "").strip()
+        if not raw:
+            return
+        key = raw.replace("\\", "/").lower()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(raw)
+
+    add(settings.get("last_data_file"))
+    for path in settings.get("recent_data_files") or []:
+        add(path)
+
+    strategies_dir = ROOT / "strategies"
+    if strategies_dir.exists():
+        for strategy_path in sorted(strategies_dir.glob("best_*.json")):
+            try:
+                payload = json.loads(strategy_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            add(payload.get("data_file"))
+
+    if DATA_UPLOAD_DIR.exists():
+        try:
+            uploads = sorted(
+                DATA_UPLOAD_DIR.rglob("*.parquet"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            uploads = []
+        for path in uploads:
+            add(path)
+
+    rows: list[dict[str, Any]] = []
+    for raw in candidates:
+        path = Path(raw)
+        if not path.is_file() or path.suffix.lower() != ".parquet":
+            continue
+        try:
+            symbol, timeframe = parse_parquet_filename(path)
+            stat = path.stat()
+        except (OSError, ValueError):
+            continue
+        rows.append(
+            {
+                "data_file": str(path.resolve()),
+                "filename": path.name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "size_bytes": stat.st_size,
+                "modified_at": stat.st_mtime,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def _browse_data_file() -> dict[str, Any]:
@@ -529,6 +599,18 @@ def api_upload_data_file(file: UploadFile = File(...)) -> dict[str, Any]:
         raise
     save_settings({"last_data_file": info["data_file"]})
     return {"ok": True, "uploaded": True, **info}
+
+
+@app.get("/api/data-files/history")
+def api_data_file_history() -> dict[str, Any]:
+    return {"data_files": _list_historical_data_files()}
+
+
+@app.post("/api/data-file/select")
+def api_select_data_file(req: DataFileRequest) -> dict[str, Any]:
+    info = _inspect_or_http(req.data_file)
+    save_settings({"last_data_file": info["data_file"]})
+    return {"ok": True, **info}
 
 
 @app.post("/api/strategy-file/browse")

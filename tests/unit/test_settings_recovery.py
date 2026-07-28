@@ -58,6 +58,29 @@ def test_save_settings_ignores_ephemeral_path(project: Path, monkeypatch: pytest
     assert loaded["last_data_file"] == "D:\\real\\XAUUSD_H1.parquet"
 
 
+def test_recent_data_files_are_persisted_in_mru_order(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = project / "web_settings.json"
+    monkeypatch.setattr(settings_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(settings_mod, "PROJECT_ROOT", project)
+    monkeypatch.setattr(settings_mod, "_is_production_settings_path", lambda: False)
+    first = project / "XAUUSD_H1.parquet"
+    second = project / "BTCUSDT_M5.parquet"
+    first.write_bytes(b"PAR1")
+    second.write_bytes(b"PAR1")
+
+    save_settings({"last_data_file": str(first)})
+    save_settings({"last_data_file": str(second)})
+    saved = save_settings({"last_data_file": str(first)})
+
+    assert saved["recent_data_files"] == [
+        str(first.resolve()),
+        str(second.resolve()),
+    ]
+    assert load_settings()["recent_data_files"] == saved["recent_data_files"]
+
+
 def test_realtime_watch_refresh_seconds_are_persisted_with_default(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
