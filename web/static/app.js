@@ -1409,12 +1409,14 @@ async function refreshBacktestReport() {
     lastEquityData = null;
     btPortfolioSig = "";
     renderEquity(null);
+    renderKellyBacktestTable({});
     return;
   }
   // 先取资金曲线（写入 lastEquityData），再渲染绩效卡，让 sparkline 用上真实数据
   await refreshEquityCurve();
   renderPortfolio(data.report);
   renderBacktestTable(data.report.symbols || {});
+  renderKellyBacktestTable(data.report.symbols || {});
 }
 
 async function refreshEquityCurve() {
@@ -1610,6 +1612,41 @@ function renderBacktestTable(symbols) {
     .join("");
 }
 
+function renderKellyBacktestTable(symbols) {
+  const tbody = $("btKellyTableBody");
+  if (!tbody) return;
+  const rows = Object.entries(symbols).filter(([, d]) => d?.kelly);
+  if (!rows.length) {
+    tbody.innerHTML =
+      '<tr class="empty-row"><td colspan="8">运行新版回测后显示凯利仓位对照结果</td></tr>';
+    if ($("btKellyHint")) $("btKellyHint").textContent = "等待回测";
+    return;
+  }
+  if ($("btKellyHint")) {
+    $("btKellyHint").textContent =
+      rows.length === 1 ? `${rows[0][0]} · 完整凯利` : `${rows.length} 个品种 · 完整凯利`;
+  }
+  tbody.innerHTML = rows
+    .map(([sym, d]) => {
+      const k = d.kelly || {};
+      const retCls = (k.total_return || 0) >= 0 ? "pos" : "neg";
+      const shCls = (k.sharpe || 0) >= 0 ? "pos" : "neg";
+      const fraction = Number(k.fraction);
+      return `
+      <tr>
+        <td class="sym-cell">${escHtml(sym)}</td>
+        <td>${Number.isFinite(fraction) ? (fraction * 100).toFixed(1) + "%" : "—"}</td>
+        <td class="${retCls}">${fmtPct(k.total_return)}</td>
+        <td class="${shCls}">${fmtSigned(k.sharpe)}</td>
+        <td>${fmtSigned(k.sortino)}</td>
+        <td>${Number.isFinite(Number(k.profit_loss_ratio)) ? Number(k.profit_loss_ratio).toFixed(3) : "—"}</td>
+        <td>${k.n_trades ?? "—"}</td>
+        <td>${k.win_rate != null ? (k.win_rate * 100).toFixed(1) + "%" : "—"}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // 交互式资金曲线（HTML / Chart.js）
 // ═══════════════════════════════════════════════════════════════════
@@ -1792,6 +1829,24 @@ function buildEquityChart(labels, symbols, portfolio) {
       backgroundColor: (ctx) => verticalGradient(ctx.chart, col.rgb, 0.3, 0),
     };
   });
+  symNames.forEach((s, i) => {
+    const kellyEquity = symbols[s].kelly_equity || [];
+    if (!kellyEquity.length) return;
+    const col = EQUITY_COLORS[i % EQUITY_COLORS.length];
+    datasets.push({
+      label: `${s} · 凯利仓位`,
+      data: kellyEquity,
+      borderColor: col.hex,
+      borderWidth: 1.8,
+      borderDash: [7, 5],
+      tension: 0.25,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      pointHoverBackgroundColor: col.hex,
+      pointHoverBorderColor: "#05070d",
+      fill: false,
+    });
+  });
   if (portfolio) {
     datasets.push({
       label: "等权组合",
@@ -1806,6 +1861,21 @@ function buildEquityChart(labels, symbols, portfolio) {
       fill: true,
       backgroundColor: (ctx) => verticalGradient(ctx.chart, "232, 237, 244", 0.16, 0),
     });
+    if ((portfolio.kelly_equity || []).length) {
+      datasets.push({
+        label: "等权组合 · 凯利仓位",
+        data: portfolio.kelly_equity,
+        borderColor: "#a78bfa",
+        borderWidth: 2,
+        borderDash: [7, 5],
+        tension: 0.25,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        pointHoverBackgroundColor: "#a78bfa",
+        pointHoverBorderColor: "#05070d",
+        fill: false,
+      });
+    }
   }
   if (equityChart) equityChart.destroy();
   equityChart = new Chart(canvas.getContext("2d"), {
@@ -1820,6 +1890,41 @@ function buildRollingChart(labels, series, windowBars) {
   if (!canvas) return;
   if (rollingChart) rollingChart.destroy();
   const data = series.rolling_sharpe || [];
+  const datasets = [
+    {
+      label: "滚动夏普",
+      data,
+      borderColor: "#fbbf24",
+      borderWidth: 1.5,
+      tension: 0.2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      pointHoverBackgroundColor: "#fbbf24",
+      pointHoverBorderColor: "#05070d",
+      spanGaps: false,
+      fill: {
+        target: "origin",
+        above: "rgba(251, 191, 36, 0.16)",
+        below: "rgba(248, 113, 113, 0.16)",
+      },
+    },
+  ];
+  if ((series.kelly_rolling_sharpe || []).length) {
+    datasets.push({
+      label: "凯利仓位 · 滚动夏普",
+      data: series.kelly_rolling_sharpe,
+      borderColor: "#a78bfa",
+      borderWidth: 1.5,
+      borderDash: [7, 5],
+      tension: 0.2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      pointHoverBackgroundColor: "#a78bfa",
+      pointHoverBorderColor: "#05070d",
+      spanGaps: false,
+      fill: false,
+    });
+  }
   const labelEl = $("btRollingLabel");
   if (labelEl) {
     labelEl.textContent = windowBars
@@ -1830,25 +1935,7 @@ function buildRollingChart(labels, series, windowBars) {
     type: "line",
     data: {
       labels,
-      datasets: [
-        {
-          label: "滚动夏普",
-          data,
-          borderColor: "#fbbf24",
-          borderWidth: 1.5,
-          tension: 0.2,
-          pointRadius: 0,
-          pointHoverRadius: 4,
-          pointHoverBackgroundColor: "#fbbf24",
-          pointHoverBorderColor: "#05070d",
-          spanGaps: false,
-          fill: {
-            target: "origin",
-            above: "rgba(251, 191, 36, 0.16)",
-            below: "rgba(248, 113, 113, 0.16)",
-          },
-        },
-      ],
+      datasets,
     },
     options: ROLLING_OPTIONS,
   });
@@ -1893,7 +1980,7 @@ function renderEquity(resp) {
   buildRollingChart(data.labels, mainSeries, data.rolling_window);
 
   if ($("btChartsHint")) {
-    $("btChartsHint").textContent = `${mainName} · 交互式资金曲线 · 悬停查看数值`;
+    $("btChartsHint").textContent = `${mainName} · 实线原仓位 / 虚线凯利仓位 · 悬停查看数值`;
   }
 }
 

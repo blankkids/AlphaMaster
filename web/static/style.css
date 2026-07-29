@@ -1500,6 +1500,42 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
 .bt-table td.neg { color: var(--danger); }
 .bt-table .sym-cell { color: var(--accent); font-weight: 600; }
 
+.bt-kelly-panel {
+  margin-top: 18px;
+}
+
+.bt-kelly-panel .panel-head {
+  align-items: flex-start;
+  gap: 18px;
+}
+
+.bt-kelly-panel .panel-head h2 {
+  margin-bottom: 5px;
+}
+
+.bt-kelly-desc,
+.bt-kelly-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.bt-kelly-note {
+  margin-top: 10px;
+  padding-left: 10px;
+  border-left: 2px solid rgba(129, 140, 248, 0.55);
+}
+
+.bt-kelly-table {
+  min-width: 860px;
+}
+
+.bt-kelly-table td:nth-child(2) {
+  color: var(--accent-3);
+  font-weight: 600;
+}
+
 /* ============================ 阶段进度条 ============================ */
 .bt-phase {
   display: flex;

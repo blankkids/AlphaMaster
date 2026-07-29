@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=29" />
+  <link rel="stylesheet" href="/static/style.css?v=30" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -353,6 +353,39 @@
         </section>
       </div>
 
+      <!-- 凯利仓位对照回测 -->
+      <section class="panel bt-kelly-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <div class="panel-head">
+          <div>
+            <h2>凯利仓位回测</h2>
+            <p class="bt-kelly-desc">方向沿用原策略，仓位幅度改为由基准胜率和盈亏比计算的完整凯利比例。</p>
+          </div>
+          <span class="hint" id="btKellyHint">等待回测</span>
+        </div>
+        <div class="table-wrap">
+          <table class="bt-table bt-kelly-table">
+            <thead>
+              <tr>
+                <th>品种</th>
+                <th>凯利仓位</th>
+                <th>收益</th>
+                <th>Sharpe</th>
+                <th>Sortino</th>
+                <th>盈亏比</th>
+                <th>交易数</th>
+                <th>胜率</th>
+              </tr>
+            </thead>
+            <tbody id="btKellyTableBody">
+              <tr class="empty-row"><td colspan="8">运行回测后显示凯利仓位对照结果</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="bt-kelly-note">凯利比例使用本次基准回测全样本的胜率与盈亏比，只适合仓位情景比较，不属于独立样本外验证。</p>
+      </section>
+
       <!-- 资金曲线（交互式 HTML 图表） -->
       <section class="panel bt-charts-panel">
         <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
@@ -401,6 +434,11 @@
                 <li>分数很弱 → 仓位接近 0（几乎不持仓）</li>
               </ul>
               <p>可以把它想成：信心越大，下注越多；但再大也不会超过“一整份仓位”。</p>
+            </li>
+            <li>
+              <strong>凯利仓位回测是什么</strong>
+              <p>第二套回测保留策略给出的多空方向，但不再使用信号强弱决定仓位大小，而是用基准回测的胜率和盈亏比计算固定凯利比例：<code>胜率 − 败率 ÷ 盈亏比</code>。</p>
+              <p>负数按 0% 处理，最高限制为 100%；手续费和滑点会按照凯利仓位的实际换仓额重新计算。</p>
             </li>
             <li>
               <strong>赚亏怎么算</strong>
@@ -631,6 +669,6 @@
   </div>
 
   <script src="/static/bg.js?v=1"></script>
-  <script src="/static/app.js?v=64"></script>
+  <script src="/static/app.js?v=65"></script>
 </body>
 </html>

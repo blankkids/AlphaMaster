@@ -70,6 +70,98 @@ def calc_sortino(pnl: np.ndarray, periods_per_year: int = _H1_PER_YEAR) -> float
     return float(np.clip(m / ds * math.sqrt(periods_per_year), -20, 20))
 
 
+def calc_kelly_fraction(
+    win_rate: float | None,
+    profit_loss_ratio: float | None,
+) -> float:
+    """完整凯利比例 f*=p-(1-p)/b；不使用杠杆，结果限制到 [0, 1]。"""
+    try:
+        p = float(win_rate)
+        b = float(profit_loss_ratio)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(p) or not 0.0 <= p <= 1.0:
+        return 0.0
+    if not math.isfinite(b) or b <= 0.0:
+        return 0.0
+    return float(np.clip(p - (1.0 - p) / b, 0.0, 1.0))
+
+
+def build_kelly_backtest(
+    result,
+    engine: BacktestEngine,
+    periods_per_year: int = _H1_PER_YEAR,
+) -> dict:
+    """用基准回测胜率/盈亏比确定固定凯利仓位，重新计算成本与绩效。"""
+    raw_fraction = calc_kelly_fraction(result.win_rate, result.profit_loss_ratio)
+    threshold = float(getattr(Config, "MIN_TRADE_EXPOSURE", 0.05))
+    fraction = raw_fraction if raw_fraction >= threshold else 0.0
+
+    base_position = np.asarray(result.position, dtype=np.float32)
+    active = np.abs(base_position) >= threshold
+    position = np.where(active, np.sign(base_position) * fraction, 0.0).astype(np.float32)
+
+    T = len(position)
+    target_ret = np.zeros(T, dtype=np.float32)
+    open_prices = np.asarray(result.open, dtype=np.float32)
+    if T >= 3:
+        target_ret[: T - 2] = np.log(
+            (open_prices[2:] + 1e-12) / (open_prices[1:-1] + 1e-12)
+        )
+
+    prev_position = np.zeros(T, dtype=np.float32)
+    prev_position[1:] = position[:-1]
+    turnover = np.abs(position - prev_position)
+    pnl = position * target_ret - turnover * float(engine.cost_rate)
+    cum_pnl = np.cumsum(pnl)
+
+    trades = engine._extract_trades(  # noqa: SLF001 - 与正式回测共用交易切分口径
+        result.symbol,
+        position,
+        open_prices,
+        np.asarray(result.times),
+        pnl,
+    )
+    n_trades = len(trades)
+    win_rate = (
+        sum(1 for trade in trades if trade.pnl > 0) / n_trades
+        if n_trades
+        else 0.0
+    )
+    avg_hold = (
+        sum(
+            trade.exit_bar - trade.entry_bar
+            for trade in trades
+            if trade.exit_bar is not None
+        ) / n_trades
+        if n_trades
+        else 0.0
+    )
+    profit_loss_ratio = engine._calc_profit_loss_ratio(trades)  # noqa: SLF001
+    drawdown = (
+        float((np.maximum.accumulate(cum_pnl) - cum_pnl).max())
+        if len(cum_pnl)
+        else 0.0
+    )
+    return {
+        "fraction": fraction,
+        "raw_fraction": raw_fraction,
+        "source_win_rate": float(result.win_rate),
+        "source_profit_loss_ratio": result.profit_loss_ratio,
+        "position": position,
+        "pnl": pnl,
+        "cum_pnl": cum_pnl,
+        "total_return": float(cum_pnl[-1]) if len(cum_pnl) else 0.0,
+        "sharpe": calc_sharpe(pnl, periods_per_year),
+        "sortino": calc_sortino(pnl, periods_per_year),
+        "profit_loss_ratio": profit_loss_ratio,
+        "n_trades": n_trades,
+        "win_rate": win_rate,
+        "avg_hold_bars": avg_hold,
+        "max_drawdown": drawdown,
+    }
+
+
 def calc_rolling_sharpe(
     pnl: np.ndarray,
     window: int = 500,
@@ -153,6 +245,12 @@ def plot_equity_curves(results_map: dict, output_dir: str, times_arr: np.ndarray
     all_pnls = np.stack([results_map[s]["pnl"] for s in syms], axis=0)
     port_pnl = all_pnls.mean(axis=0)
     port_cum = np.cumsum(port_pnl)
+    all_kelly_pnls = np.stack(
+        [results_map[s]["kelly"]["pnl"] for s in syms],
+        axis=0,
+    )
+    port_kelly_pnl = all_kelly_pnls.mean(axis=0)
+    port_kelly_cum = np.cumsum(port_kelly_pnl)
 
     T = len(port_cum)
     x = np.arange(T)
@@ -166,6 +264,14 @@ def plot_equity_curves(results_map: dict, output_dir: str, times_arr: np.ndarray
         )
         ax_eq.fill_between(x, cum, 0, where=cum >= 0, alpha=0.08, color="#1565c0")
         ax_eq.fill_between(x, cum, 0, where=cum < 0,  alpha=0.08, color="#b71c1c")
+        ax_eq.plot(
+            x,
+            results_map[sym]["kelly"]["cum_pnl"],
+            linewidth=1.8,
+            linestyle="--",
+            color="#7c3aed",
+            label=f"凯利仓位（{results_map[sym]['kelly']['fraction']:.1%}）",
+        )
         title_head = f"{sym} 资金曲线"
         show_pnl, show_cum = results_map[sym]["pnl"], cum
     else:
@@ -178,6 +284,14 @@ def plot_equity_curves(results_map: dict, output_dir: str, times_arr: np.ndarray
         ax_eq.plot(
             x, port_cum, linewidth=2.2, color="black",
             label=f"等权组合（索提诺 {calc_sortino(port_pnl, periods_per_year):+.2f}）",
+        )
+        ax_eq.plot(
+            x,
+            port_kelly_cum,
+            linewidth=1.8,
+            linestyle="--",
+            color="#7c3aed",
+            label="凯利仓位组合",
         )
         ax_eq.fill_between(x, port_cum, 0, where=port_cum >= 0, alpha=0.06, color="#1565c0")
         ax_eq.fill_between(x, port_cum, 0, where=port_cum < 0,  alpha=0.06, color="#b71c1c")
@@ -283,6 +397,9 @@ def export_equity_json(
         cum = results_map[s]["cum_pnl"]
         roll = calc_rolling_sharpe(results_map[s]["pnl"], window=rolling_window,
                                    periods_per_year=periods_per_year)
+        kelly = results_map[s].get("kelly") or {}
+        kelly_pnl = kelly.get("pnl")
+        kelly_cum = kelly.get("cum_pnl")
         pl = results_map[s].get("profit_loss_ratio")
         out["symbols"][s] = {
             "equity": _sample(cum),
@@ -291,9 +408,27 @@ def export_equity_json(
             "sortino": round(float(results_map[s]["sortino"]), 4),
             "total_return": round(float(results_map[s]["total_return"]), 6),
             "profit_loss_ratio": round(float(pl), 4) if pl is not None else None,
+            "kelly_fraction": round(float(kelly.get("fraction", 0.0)), 6),
+            "kelly_equity": _sample(kelly_cum) if kelly_cum is not None else [],
+            "kelly_rolling_sharpe": (
+                _sample(
+                    calc_rolling_sharpe(
+                        kelly_pnl,
+                        window=rolling_window,
+                        periods_per_year=periods_per_year,
+                    )
+                )
+                if kelly_pnl is not None else []
+            ),
         }
 
     if len(syms) > 1:
+        all_kelly_pnls = np.stack(
+            [results_map[s]["kelly"]["pnl"] for s in syms],
+            axis=0,
+        )
+        port_kelly_pnl = all_kelly_pnls.mean(axis=0)
+        port_kelly_cum = np.cumsum(port_kelly_pnl)
         pl_vals = [
             results_map[s]["profit_loss_ratio"]
             for s in syms
@@ -308,6 +443,14 @@ def export_equity_json(
             "sortino": round(float(calc_sortino(port_pnl, periods_per_year)), 4),
             "total_return": round(float(port_cum[-1]), 6),
             "profit_loss_ratio": round(port_pl, 4) if port_pl is not None else None,
+            "kelly_equity": _sample(port_kelly_cum),
+            "kelly_rolling_sharpe": _sample(
+                calc_rolling_sharpe(
+                    port_kelly_pnl,
+                    window=rolling_window,
+                    periods_per_year=periods_per_year,
+                )
+            ),
         }
 
     path = Path(output_dir) / "equity_curve.json"
@@ -491,6 +634,7 @@ def main():
             "profit_loss_ratio": pl_ratio,
             "cost_rate":    cost_rate,
         }
+        results_map[sym]["kelly"] = build_kelly_backtest(r, engine, ppy)
 
     # ── 5. 打印各品种统计 ─────────────────────────────────────────────
     print(f"\n{'='*62}")
@@ -531,6 +675,25 @@ def main():
               f"{pl_s}")
         print(f"\n  正收益品种: {sum(1 for d in results_map.values() if d['total_return']>0)}/{len(results_map)}")
         print(f"  Sharpe>1 品种: {sum(1 for d in results_map.values() if d['sharpe']>1)}/{len(results_map)}")
+
+        print(f"\n  凯利仓位对照回测（方向不变，仓位幅度改用完整凯利比例）")
+        print(f"  {'品种':12s} {'Kelly':>8} {'PnL':>8} {'Sharpe':>8} {'Sortino':>8} {'盈亏比':>8} {'Trades':>7} {'WinRate':>8}")
+        print(f"  {'─'*82}")
+        for sym, d in results_map.items():
+            k = d["kelly"]
+            k_pl = k["profit_loss_ratio"]
+            k_pl_s = f"{k_pl:8.3f}" if k_pl is not None else f"{'—':>8}"
+            print(
+                f"  {sym:12s} "
+                f"{k['fraction']:8.1%} "
+                f"{k['total_return']:+8.3f} "
+                f"{k['sharpe']:+8.3f} "
+                f"{k['sortino']:+8.3f} "
+                f"{k_pl_s} "
+                f"{k['n_trades']:7d} "
+                f"{k['win_rate']:8.1%}"
+            )
+        print("  注：凯利比例使用本次基准回测全样本的胜率与盈亏比，仅作仓位情景分析。")
     print(f"{'='*62}\n")
 
     # ── 6. 资金曲线图 ─────────────────────────────────────────────────
@@ -552,6 +715,8 @@ def main():
     for sym, d in results_map.items():
         formula = symbol_formulas.get(sym, [])
         pl = d["profit_loss_ratio"]
+        k = d["kelly"]
+        k_pl = k["profit_loss_ratio"]
         report["symbols"][sym] = {
             "formula":      formula,
             "readable":     decode_formula(formula),
@@ -563,13 +728,45 @@ def main():
             "win_rate":     round(d["win_rate"], 4),
             "avg_hold_bars":round(d["avg_hold"], 2),
             "profit_loss_ratio": round(pl, 4) if pl is not None else None,
+            "kelly": {
+                "fraction": round(k["fraction"], 6),
+                "raw_fraction": round(k["raw_fraction"], 6),
+                "source_win_rate": round(k["source_win_rate"], 4),
+                "source_profit_loss_ratio": (
+                    round(k["source_profit_loss_ratio"], 4)
+                    if k["source_profit_loss_ratio"] is not None else None
+                ),
+                "total_return": round(k["total_return"], 6),
+                "sharpe": round(k["sharpe"], 4),
+                "sortino": round(k["sortino"], 4),
+                "profit_loss_ratio": round(k_pl, 4) if k_pl is not None else None,
+                "n_trades": k["n_trades"],
+                "win_rate": round(k["win_rate"], 4),
+                "avg_hold_bars": round(k["avg_hold_bars"], 2),
+                "max_drawdown": round(k["max_drawdown"], 6),
+            },
         }
     if results_map:
+        all_kelly_pnls = np.stack(
+            [d["kelly"]["pnl"] for d in results_map.values()],
+            axis=0,
+        )
+        port_kelly_pnl = all_kelly_pnls.mean(axis=0)
+        port_kelly_cum = np.cumsum(port_kelly_pnl)
         report["portfolio"] = {
             "total_return": round(float(port_cum[-1]), 6),
             "sharpe":       round(p_sharpe, 4),
             "sortino":      round(p_sortino, 4),
             "profit_loss_ratio": round(p_pl_ratio, 4) if p_pl_ratio is not None else None,
+            "kelly": {
+                "average_fraction": round(
+                    float(np.mean([d["kelly"]["fraction"] for d in results_map.values()])),
+                    6,
+                ),
+                "total_return": round(float(port_kelly_cum[-1]), 6),
+                "sharpe": round(calc_sharpe(port_kelly_pnl, ppy), 4),
+                "sortino": round(calc_sortino(port_kelly_pnl, ppy), 4),
+            },
         }
     rp = f"{OUTPUT_DIR}/multi_factor_report.json"
     with open(rp, "w") as f:

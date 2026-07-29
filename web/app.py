@@ -1050,6 +1050,7 @@ def _filter_report_for_symbol(report: dict[str, Any], symbol: str) -> dict[str, 
             "profit_loss_ratio": sym_data.get("profit_loss_ratio"),
             "n_trades": sym_data.get("n_trades"),
             "win_rate": sym_data.get("win_rate"),
+            "kelly": sym_data.get("kelly"),
         },
     }
 
