@@ -17,7 +17,10 @@ model_core/ops.py -- 算子库（Operator_Library, R2）
 可变位置参数形式（`*operands`），注册层会跳过 arity 观测校验，从而避免对既有算子
 的 `ArityMismatchError` 误报。
 """
+import math
+
 import torch
+import torch.nn.functional as F
 
 from .registry import OperatorSpec, Registry
 
@@ -144,35 +147,73 @@ def _ema(x: torch.Tensor, alpha: float) -> torch.Tensor:
     # 上面的 unfold 对 1D 不直接 work，改用简单循环近似
 
 
+_EMA_TAIL_EPS = 1e-6
+_EMA_KERNEL_CACHE: dict[tuple[int, torch.dtype, torch.device], torch.Tensor] = {}
+
+
+def _ema_kernel(x: torch.Tensor, span: int) -> torch.Tensor:
+    """返回适配 ``x`` dtype/device 的有限记忆 EMA 卷积核。"""
+    key = (span, x.dtype, x.device)
+    cached = _EMA_KERNEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    alpha = 2.0 / (span + 1.0)
+    decay = 1.0 - alpha
+    # 最旧样本的影响 decay**(width-1) 不超过 eps。
+    width = max(
+        2,
+        math.ceil(math.log(_EMA_TAIL_EPS) / math.log(decay)) + 1,
+    )
+    calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+    powers = torch.arange(
+        width - 1,
+        -1,
+        -1,
+        dtype=calc_dtype,
+        device=x.device,
+    )
+    weights = alpha * torch.pow(
+        torch.tensor(decay, dtype=calc_dtype, device=x.device),
+        powers,
+    )
+    # 把截断尾部质量并入最旧样本：等价于在每个有限窗口的最左端
+    # 以该样本初始化递推，常数输入可严格保持为常数，且权重和为 1。
+    weights[0] = decay ** (width - 1)
+    kernel = weights.to(dtype=x.dtype).reshape(1, 1, width).contiguous()
+    _EMA_KERNEL_CACHE[key] = kernel
+    return kernel
+
+
 def _ema_simple(x: torch.Tensor, span: int, exact: bool = False) -> torch.Tensor:
-    """指数加权移动平均（因果），span 期。
+    """指数加权移动平均（因果），默认走 CPU/CUDA 通用的 ``conv1d``。
 
-    P1-10 修复：统一使用 exact 递推路径，避免训练时 T 大走 vectorized 卷积近似、
-    实盘时 T 小走 exact 递推导致的 train-serve skew（虽然 max|Δ|<1e-4，但会
-    通过 MACD_HIST/PPO/TRIX_15/EMA_RATIO_12_26/TREND_STRENGTH_50/SUPERTREND_DIR/
-    SAR_DIST 等特征传播，在 tanh 阈值附近可能改变方向判定）。
+    默认路径使用固定有限窗口，不按输入序列长度切换实现，因此训练、回测和实时
+    分析走完全相同的数值路径。窗口只包含当前及过去样本，不引入未来数据；截断
+    误差由 ``_EMA_TAIL_EPS`` 控制。
 
-    实测 exact 递推在 N=1, T=10000 下耗时 < 5ms，性能损失可接受。
-
-    参数：
-        span: EMA 周期
-        exact: 保留参数兼容性，无论取值均使用 exact 递推（统一路径）
+    ``exact=True`` 保留严格递推实现，仅用于数值回归测试和诊断。
     """
     alpha = 2.0 / (span + 1.0)
-    N, T = x.shape
+    _, length = x.shape
 
-    if T == 0:
+    if length == 0:
         return x.clone()
-    if alpha >= 1.0:
+    if span <= 1 or alpha >= 1.0:
         return x.clone()
 
-    # ── 统一使用 exact 递推路径（O(N·T) 顺序累积）──────────────────
-    # 消除 T < 2*w_full 与 T >= 2*w_full 的路径分叉，保证训练/实盘数值一致
-    out = torch.zeros_like(x)
-    out[:, 0] = x[:, 0]
-    for t in range(1, T):
-        out[:, t] = alpha * x[:, t] + (1 - alpha) * out[:, t - 1]
-    return out
+    if exact:
+        out = torch.zeros_like(x)
+        out[:, 0] = x[:, 0]
+        for t in range(1, length):
+            out[:, t] = alpha * x[:, t] + (1 - alpha) * out[:, t - 1]
+        return out
+
+    kernel = _ema_kernel(x, span)
+    width = kernel.shape[-1]
+    left = x[:, :1].expand(-1, width - 1)
+    padded = torch.cat([left, x], dim=1).unsqueeze(1)
+    return F.conv1d(padded, kernel).squeeze(1)
 
 
 def _ts_quantile(x: torch.Tensor, d: int) -> torch.Tensor:

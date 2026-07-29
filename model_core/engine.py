@@ -639,6 +639,10 @@ class AlphaEngine:
         if verbose_header:
             print("开始 Alpha 因子挖掘训练" +
                   ("（含 LoRD 正则化）..." if self.use_lord else "..."))
+            device_label = str(ModelConfig.DEVICE)
+            if ModelConfig.DEVICE.type == "cuda":
+                device_label += f" ({torch.cuda.get_device_name(ModelConfig.DEVICE)})"
+            print(f"   训练设备: {device_label}")
             print(f"   策略熵: 坍塌阈值={ModelConfig.ENTROPY_COLLAPSE_THRESH}  "
                   f"系数上限={ModelConfig.ENTROPY_COEFF_MAX}  "
                   f"连续坍塌步数={ModelConfig.ENTROPY_COLLAPSE_STEPS}")
