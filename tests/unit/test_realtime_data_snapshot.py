@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -10,6 +12,8 @@ from web.realtime_manager import (
     RealtimeManager,
     WatchTask,
     _build_data_snapshot,
+    _load_backtest_metrics,
+    _load_strategy_meta,
     _normalize_refresh_seconds,
 )
 
@@ -35,6 +39,10 @@ def _task() -> WatchTask:
         strategy_timeframe="5m",
         best_score=1.0,
         cadence_s=5,
+        win_rate=0.56,
+        profit_loss_ratio=1.7,
+        n_trades=114,
+        performance_source="latest_backtest",
     )
 
 
@@ -69,8 +77,72 @@ def test_realtime_refresh_seconds_default_and_validation() -> None:
 
 def test_watch_exposes_and_persists_refresh_seconds() -> None:
     task = _task()
-    assert task.to_public()["refresh_seconds"] == 5
+    public = task.to_public()
+    assert public["refresh_seconds"] == 5
+    assert public["win_rate"] == 0.56
+    assert public["profit_loss_ratio"] == 1.7
+    assert public["n_trades"] == 114
     assert task.persist_dict()["refresh_seconds"] == 5
+
+
+def test_backtest_metrics_require_same_symbol_and_formula(tmp_path: Path) -> None:
+    report_path = tmp_path / "multi_factor_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "symbols": {
+                    "159170": {
+                        "formula": [1, 2, 3],
+                        "win_rate": 0.56,
+                        "profit_loss_ratio": 1.7,
+                        "n_trades": 114,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _load_backtest_metrics("159170", [9, 9, 9], report_path) == {}
+    assert _load_backtest_metrics("other", [1, 2, 3], report_path) == {}
+    assert _load_backtest_metrics("159170", [1, 2, 3], report_path) == {
+        "win_rate": 0.56,
+        "profit_loss_ratio": 1.7,
+        "n_trades": 114,
+        "performance_source": "latest_backtest",
+    }
+
+
+def test_strategy_meta_includes_matching_backtest_metrics(tmp_path: Path) -> None:
+    strategy_path = tmp_path / "best_159170.json"
+    strategy_path.write_text(
+        json.dumps({"symbol": "159170", "formula": [1, 2, 3], "best_score": 2.0}),
+        encoding="utf-8",
+    )
+    report_path = tmp_path / "multi_factor_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "symbols": {
+                    "159170": {
+                        "formula": [1, 2, 3],
+                        "win_rate": 0.625,
+                        "profit_loss_ratio": 1.5,
+                        "n_trades": 80,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with patch("web.realtime_manager.BACKTEST_REPORT_PATH", report_path):
+        meta = _load_strategy_meta(str(strategy_path))
+
+    assert meta["win_rate"] == 0.625
+    assert meta["profit_loss_ratio"] == 1.5
+    assert meta["n_trades"] == 80
+    assert meta["performance_source"] == "latest_backtest"
 
 
 def test_countdown_uses_refresh_interval_instead_of_bar_close() -> None:

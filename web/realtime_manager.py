@@ -24,6 +24,7 @@ from web.data_sources.factory import SOURCE_KINDS, get_source
 from web.settings import load_settings, save_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BACKTEST_REPORT_PATH = PROJECT_ROOT / "backtest_output" / "multi_factor_report.json"
 
 # 每个监控项可独立设置数据刷新秒数；信号仍使用已收盘 K 线计算。
 DEFAULT_REFRESH_SECONDS = 5
@@ -114,16 +115,108 @@ def _ensure_closed_bars(bars: list, timeframe: str, now: float | None = None) ->
     return out
 
 
+def _metric_float(
+    value: Any,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float | None:
+    try:
+        metric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(metric):
+        return None
+    if minimum is not None and metric < minimum:
+        return None
+    if maximum is not None and metric > maximum:
+        return None
+    return metric
+
+
+def _metric_int(value: Any, *, minimum: int = 0) -> int | None:
+    try:
+        return max(minimum, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_backtest_metrics(
+    symbol: str | None,
+    formula: list[int] | None,
+    report_path: Path | None = None,
+) -> dict[str, Any]:
+    """读取最近一次同品种、同公式回测指标，供胜率和凯利仓位使用。"""
+    if not symbol or not formula:
+        return {}
+    path = report_path or BACKTEST_REPORT_PATH
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            return {}
+        row = (report.get("symbols") or {}).get(symbol)
+        if not isinstance(row, dict):
+            return {}
+        report_formula = [int(token) for token in row.get("formula") or []]
+        expected_formula = [int(token) for token in formula]
+        if report_formula != expected_formula:
+            return {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+    win_rate = _metric_float(row.get("win_rate"), minimum=0.0, maximum=1.0)
+    profit_loss_ratio = _metric_float(row.get("profit_loss_ratio"), minimum=0.0)
+    n_trades = _metric_int(row.get("n_trades"))
+    if win_rate is None and profit_loss_ratio is None:
+        return {}
+    return {
+        "win_rate": win_rate,
+        "profit_loss_ratio": profit_loss_ratio,
+        "n_trades": n_trades,
+        "performance_source": "latest_backtest",
+    }
+
+
 def _load_strategy_meta(path: str) -> dict[str, Any]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(data, list):
-        return {"formula": data, "vocab_version": "legacy", "symbol": None, "timeframe": None, "best_score": None}
+        return {
+            "formula": data,
+            "vocab_version": "legacy",
+            "symbol": None,
+            "timeframe": None,
+            "best_score": None,
+            "win_rate": None,
+            "profit_loss_ratio": None,
+            "n_trades": None,
+            "performance_source": None,
+        }
+    formula = data.get("formula")
+    symbol = data.get("symbol")
+    metrics = _load_backtest_metrics(symbol, formula)
+    # 兼容将回测指标直接随策略导出的文件；策略自带指标优先于全局最新报告。
+    direct_win_rate = _metric_float(data.get("win_rate"), minimum=0.0, maximum=1.0)
+    direct_pl_ratio = _metric_float(data.get("profit_loss_ratio"), minimum=0.0)
+    if direct_win_rate is not None or direct_pl_ratio is not None:
+        metrics = dict(metrics)
+        if direct_win_rate is not None:
+            metrics["win_rate"] = direct_win_rate
+        if direct_pl_ratio is not None:
+            metrics["profit_loss_ratio"] = direct_pl_ratio
+        direct_n_trades = _metric_int(data.get("n_trades"))
+        if direct_n_trades is not None:
+            metrics["n_trades"] = direct_n_trades
+        metrics["performance_source"] = "strategy_file"
     return {
-        "formula": data.get("formula"),
+        "formula": formula,
         "vocab_version": data.get("vocab_version"),
-        "symbol": data.get("symbol"),
+        "symbol": symbol,
         "timeframe": data.get("timeframe"),
         "best_score": data.get("best_score"),
+        "win_rate": metrics.get("win_rate"),
+        "profit_loss_ratio": metrics.get("profit_loss_ratio"),
+        "n_trades": metrics.get("n_trades"),
+        "performance_source": metrics.get("performance_source"),
     }
 
 
@@ -162,6 +255,10 @@ class WatchTask:
     strategy_timeframe: str | None
     best_score: float | None
     cadence_s: int
+    win_rate: float | None = None
+    profit_loss_ratio: float | None = None
+    n_trades: int | None = None
+    performance_source: str | None = None
     # 运行时状态
     state: str = "pending"          # pending|ok|insufficient|error
     direction: str | None = None
@@ -197,6 +294,10 @@ class WatchTask:
             "strategy_symbol": self.strategy_symbol,
             "strategy_timeframe": self.strategy_timeframe,
             "best_score": self.best_score,
+            "win_rate": self.win_rate,
+            "profit_loss_ratio": self.profit_loss_ratio,
+            "n_trades": self.n_trades,
+            "performance_source": self.performance_source,
             "refresh_seconds": self.cadence_s,
             "state": self.state,
             "direction": self.direction,
@@ -243,6 +344,7 @@ class RealtimeManager:
         self._bar_cache: dict[tuple[str, str, str], tuple[float, list]] = {}
         self._loaded = False
         self._tv_blocked_until = 0.0
+        self._backtest_report_mtime_ns: int | None = None
 
     # ── 持久化 ──────────────────────────────────────────────────────────
     def load_persisted(self) -> None:
@@ -314,6 +416,8 @@ class RealtimeManager:
         meta = _load_strategy_meta(path)
         if not meta.get("formula"):
             raise ValueError("策略文件缺少 formula")
+        if not meta.get("performance_source"):
+            meta.update(_load_backtest_metrics(meta.get("symbol") or symbol, meta["formula"]))
 
         name = Path(path).stem
         task_id = f"{source}:{symbol}:{timeframe}:{name}"
@@ -337,6 +441,10 @@ class RealtimeManager:
             strategy_timeframe=meta.get("timeframe"),
             best_score=meta.get("best_score"),
             cadence_s=refresh_seconds,
+            win_rate=meta.get("win_rate"),
+            profit_loss_ratio=meta.get("profit_loss_ratio"),
+            n_trades=meta.get("n_trades"),
+            performance_source=meta.get("performance_source"),
             warn=warn,
             next_due=0.0,
         )
@@ -359,8 +467,33 @@ class RealtimeManager:
             self._persist()
 
     # ── 状态 ────────────────────────────────────────────────────────────
+    def _refresh_backtest_metrics(self) -> None:
+        """回测报告更新后，自动刷新已存在监控项的胜率与盈亏比。"""
+        try:
+            mtime_ns = BACKTEST_REPORT_PATH.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = -1
+        if mtime_ns == self._backtest_report_mtime_ns:
+            return
+        self._backtest_report_mtime_ns = mtime_ns
+        for task in self._tasks.values():
+            if task.performance_source == "strategy_file":
+                continue
+            metrics = _load_backtest_metrics(task.strategy_symbol or task.symbol, task.formula)
+            if metrics:
+                task.win_rate = metrics.get("win_rate")
+                task.profit_loss_ratio = metrics.get("profit_loss_ratio")
+                task.n_trades = metrics.get("n_trades")
+                task.performance_source = metrics.get("performance_source")
+            elif task.performance_source == "latest_backtest":
+                task.win_rate = None
+                task.profit_loss_ratio = None
+                task.n_trades = None
+                task.performance_source = None
+
     def status(self) -> dict[str, Any]:
         with self._lock:
+            self._refresh_backtest_metrics()
             watches = [t.to_public() for t in self._tasks.values()]
         nearest = None
         for w in watches:

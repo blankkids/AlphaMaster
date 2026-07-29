@@ -1942,12 +1942,14 @@ let rtSourceById = {};
 let rtImportedStrategy = null; // {path, name}
 let rtGridSig = "";
 let rtDataSig = "";
+let rtLastWatches = [];
 let rtServerSkew = 0; // server_time - local_now（秒）
 let rtCountdownTimer = null;
 let rtTvBlockedShownAt = 0;
 let rtTvWikiUrl = "https://my.feishu.cn/wiki/FuqnwkPwdiCLhQkPloKc7r1lntg";
 let rtMinRefreshSeconds = 1;
 let rtMaxRefreshSeconds = 30 * 24 * 60 * 60;
+const RT_CAPITAL_STORAGE_KEY = "alphamaster.realtime.totalCapital";
 const RT_REFRESH_UNIT_SECONDS = Object.freeze({
   second: 1,
   minute: 60,
@@ -2020,6 +2022,60 @@ function rtNumber(value, kind = "price") {
     minimumFractionDigits: 0,
     maximumFractionDigits: digits,
   });
+}
+
+function rtReadTotalCapital() {
+  const capital = Number($("rtTotalCapital")?.value);
+  return Number.isFinite(capital) && capital > 0 ? capital : null;
+}
+
+function rtFormatCapital(value) {
+  if (!Number.isFinite(Number(value))) return "—";
+  return new Intl.NumberFormat("zh-CN", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(Number(value));
+}
+
+function rtKellyPosition(w) {
+  if (w.win_rate == null || w.profit_loss_ratio == null) return null;
+  const p = Number(w.win_rate);
+  const b = Number(w.profit_loss_ratio);
+  if (!Number.isFinite(p) || p < 0 || p > 1 || !Number.isFinite(b) || b <= 0) {
+    return null;
+  }
+  // 完整凯利：f* = p - q / b；不使用杠杆，负期望和超过本金部分分别限制为 0/100%。
+  const rawFraction = p - (1 - p) / b;
+  const formulaFraction = Math.max(0, Math.min(1, rawFraction));
+  const hasTradableSignal =
+    w.state === "ok" && (w.direction === "LONG" || w.direction === "SHORT");
+  const fraction = hasTradableSignal ? formulaFraction : 0;
+  const capital = rtReadTotalCapital();
+  return {
+    fraction,
+    amount: capital == null ? null : capital * fraction,
+    hasTradableSignal,
+  };
+}
+
+function rtInitCapitalInput() {
+  const input = $("rtTotalCapital");
+  if (!input) return;
+  try {
+    const saved = localStorage.getItem(RT_CAPITAL_STORAGE_KEY);
+    if (saved && Number(saved) > 0) input.value = saved;
+  } catch (_) {}
+  const update = () => {
+    const capital = rtReadTotalCapital();
+    try {
+      if (capital == null) localStorage.removeItem(RT_CAPITAL_STORAGE_KEY);
+      else localStorage.setItem(RT_CAPITAL_STORAGE_KEY, String(capital));
+    } catch (_) {}
+    rtGridSig = "";
+    renderRealtimeGrid(rtLastWatches);
+  };
+  input.addEventListener("input", update);
+  input.addEventListener("change", update);
 }
 
 function rtSyncRefreshRange() {
@@ -2519,6 +2575,7 @@ async function refreshRealtime() {
     } catch (_) {}
   }
   rtEngineRunning = !!st.running;
+  rtLastWatches = st.watches || [];
   if (typeof st.server_time === "number") {
     rtServerSkew = st.server_time - Date.now() / 1000;
   }
@@ -2547,9 +2604,9 @@ async function refreshRealtime() {
       hint.textContent = base;
     }
   }
-  renderRealtimeGrid(st.watches || []);
-  renderRealtimeData(st.watches || []);
-  maybeShowTvBlockedFromWatches(st.watches || []);
+  renderRealtimeGrid(rtLastWatches);
+  renderRealtimeData(rtLastWatches);
+  maybeShowTvBlockedFromWatches(rtLastWatches);
   ensureRtCountdownTimer();
   tickRtCountdowns();
 }
@@ -2591,9 +2648,12 @@ function renderRealtimeGrid(watches) {
         w.evaluating ? 1 : 0,
         w.next_evaluation_at || "",
         w.refresh_seconds || 5,
+        w.win_rate ?? "",
+        w.profit_loss_ratio ?? "",
+        w.n_trades ?? "",
       ].join("~")
     )
-    .join("|");
+    .join("|") + `|capital=${rtReadTotalCapital() ?? ""}`;
   // 签名未变时仍同步刷新/判断倒计时锚点
   if (sig === rtGridSig) {
     watches.forEach((w) => {
@@ -2635,6 +2695,36 @@ function renderRealtimeGrid(watches) {
           ? `<div class="rt-msg">${escHtml(displayMsg)}</div>`
           : "";
       const sizeText = plain ? plain.size : "—";
+      const winRate = Number(w.win_rate);
+      const winRateValid =
+        w.win_rate != null && Number.isFinite(winRate) && winRate >= 0 && winRate <= 1;
+      const plRatio = Number(w.profit_loss_ratio);
+      const plRatioValid =
+        w.profit_loss_ratio != null && Number.isFinite(plRatio) && plRatio > 0;
+      const tradesText =
+        w.n_trades != null && Number.isFinite(Number(w.n_trades))
+          ? ` · ${Math.max(0, Number(w.n_trades)).toLocaleString("zh-CN")}笔`
+          : "";
+      const winRateText = winRateValid ? `${(winRate * 100).toFixed(1)}%${tradesText}` : "无匹配回测";
+      const kelly = rtKellyPosition(w);
+      let kellyText = "等待胜率与盈亏比";
+      let kellyClass = "is-empty";
+      if (kelly) {
+        const pct = `${(kelly.fraction * 100).toFixed(1)}%`;
+        if (!kelly.hasTradableSignal) {
+          kellyText = `${pct} · 当前观望`;
+          kellyClass = "is-zero";
+        } else if (kelly.amount == null) {
+          kellyText = `${pct} · 请输入总资金`;
+          kellyClass = kelly.fraction > 0 ? "is-ready" : "is-zero";
+        } else {
+          kellyText = `${pct} · ${rtFormatCapital(kelly.amount)}`;
+          kellyClass = kelly.fraction > 0 ? "is-ready" : "is-zero";
+        }
+      }
+      const performanceTitle = winRateValid
+        ? `最近一次同品种、同公式回测；盈亏比 ${plRatioValid ? plRatio.toFixed(2) : "—"}`
+        : "请先使用该策略完成一次回测";
       return `
     <div class="rt-card ${dirCls}" data-id="${escHtml(w.id)}">
       <button class="rt-remove" data-remove="${escHtml(w.id)}" title="移除监控">×</button>
@@ -2654,6 +2744,16 @@ function renderRealtimeGrid(watches) {
         <span class="rt-meta-item">因子 <b>${factorText}</b></span>
         <span class="rt-meta-item">${escHtml(w.strategy_name)}</span>
         <span class="rt-meta-item">刷新 ${escHtml(rtFormatRefreshInterval(w.refresh_seconds))}</span>
+      </div>
+      <div class="rt-kelly-row">
+        <span class="rt-kelly-metric${winRateValid ? "" : " is-empty"}" title="${escHtml(performanceTitle)}">
+          回测胜率
+          <b>${escHtml(winRateText)}</b>
+        </span>
+        <span class="rt-kelly-metric ${kellyClass}" title="完整凯利仓位；负值归零，最高限制为 100%，观望信号仓位为 0">
+          凯利仓位
+          <b>${escHtml(kellyText)}</b>
+        </span>
       </div>
       <div class="rt-foot">
         <span class="rt-state ${w.state}">${RT_STATE_LABEL[w.state] || w.state}</span>
@@ -2829,6 +2929,7 @@ async function init() {
   });
 
   // 实时分析控制
+  rtInitCapitalInput();
   if ($("rtSourceSelect")) $("rtSourceSelect").addEventListener("change", onRtSourceChange);
   if ($("rtStrategySelect")) $("rtStrategySelect").addEventListener("change", onRtStrategyChange);
   if ($("rtRefreshUnit")) $("rtRefreshUnit").addEventListener("change", rtSyncRefreshRange);

@@ -1886,7 +1886,40 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
 
 .rt-source-hint.bad { color: var(--danger); }
 
-.rt-head-right { display: flex; align-items: center; gap: 14px; }
+.rt-head-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
+.rt-capital-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-family: var(--mono);
+}
+
+.rt-capital-control input {
+  width: 150px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  outline: none;
+  background: rgba(8, 12, 20, 0.75);
+  color: var(--text);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.rt-capital-control input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(94, 234, 212, 0.1);
+}
 
 .rt-grid {
   display: grid;
@@ -2112,6 +2145,41 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
 .rt-meta-item { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rt-meta-item b { color: var(--text); font-weight: 600; }
 
+.rt-kelly-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.rt-kelly-metric {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(130, 150, 180, 0.15);
+  border-radius: 8px;
+  background: rgba(8, 12, 20, 0.42);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  line-height: 1.35;
+}
+
+.rt-kelly-metric b {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rt-kelly-metric.is-empty b { color: var(--text-muted); }
+.rt-kelly-metric.is-zero b { color: var(--warn); }
+.rt-kelly-metric.is-ready b { color: var(--accent); }
+
 .rt-foot {
   display: flex;
   flex-wrap: wrap;
@@ -2149,6 +2217,27 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
   font-size: 0.68rem;
   color: #f0c4c4;
   line-height: 1.4;
+}
+
+@media (max-width: 680px) {
+  .rt-radar-panel .panel-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .rt-head-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .rt-capital-control {
+    flex: 1;
+  }
+
+  .rt-capital-control input {
+    min-width: 0;
+    width: 100%;
+  }
 }
 
 .rt-feishu-panel {

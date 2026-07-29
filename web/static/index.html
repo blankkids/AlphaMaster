@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=28" />
+  <link rel="stylesheet" href="/static/style.css?v=29" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -472,6 +472,10 @@
         <div class="panel-head">
           <h2>信号雷达</h2>
           <div class="rt-head-right">
+            <label class="rt-capital-control" title="只保存在当前浏览器，用于计算凯利仓位金额">
+              <span>总资金</span>
+              <input type="number" id="rtTotalCapital" min="0" step="1000" inputmode="decimal" placeholder="例如 100000" />
+            </label>
             <span class="hint" id="rtStatusHint">未启动</span>
           </div>
         </div>
@@ -490,6 +494,8 @@
                 <li>若显示「没把握 / 先观望」，表示信号太弱，先别当买卖依据。</li>
                 <li>「因子」是内部算出来的分数，负的偏空、正的偏多，一般不用盯着它；看方向 + 把握就够了。</li>
                 <li>这不是「猜对的概率」，只是策略此刻有多坚决。</li>
+                <li>「回测胜率」和「盈亏比」来自最近一次<strong>同品种、同公式</strong>回测；凯利仓位按 <strong>胜率 − 败率 ÷ 盈亏比</strong>计算。没有匹配回测时不会估算。</li>
+                <li>输入总资金后显示凯利仓位比例与金额；负值按 0% 处理，最高限制为 100%。凯利值只用于资金管理参考，不代表收益保证。</li>
               </ul>
             </li>
             <li>
@@ -625,6 +631,6 @@
   </div>
 
   <script src="/static/bg.js?v=1"></script>
-  <script src="/static/app.js?v=63"></script>
+  <script src="/static/app.js?v=64"></script>
 </body>
 </html>
