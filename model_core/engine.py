@@ -32,6 +32,12 @@ from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import StackVM
 from .backtest import MT5Backtest, estimate_periods_per_year
 from .vocab import FORMULA_VOCAB, VOCAB_VERSION, VocabVersionMismatchError  # task 12.2
+from utils.training_identity import (
+    checkpoint_filename,
+    history_filename,
+    normalize_timeframe,
+    strategy_filename,
+)
 
 # P3：冠军在场时间稳健性校验所需
 try:
@@ -51,18 +57,24 @@ except ImportError:
     _CHECKPOINT_DIR = pathlib.Path("checkpoints")
 
 
-def _strategy_file_for_symbol(symbol: str | None) -> str:
-    """返回该品种对应的策略文件路径。
+def _strategy_file_for_symbol(
+    symbol: str | None,
+    timeframe: str | None = None,
+) -> str:
+    """返回该品种和周期对应的策略文件路径。
 
-    单品种训练时使用 strategies/best_{symbol}.json，
+    单品种训练时使用 strategies/best_{symbol}_{timeframe}.json，
     多品种/未指定品种时回退到默认路径。
     """
     if symbol:
-        return str(pathlib.Path("strategies") / f"best_{symbol}.json")
+        return str(pathlib.Path("strategies") / strategy_filename(symbol, timeframe))
     return _STRATEGY_FILE
 
 
-def _fallback_data_file_for_symbol(symbol: str) -> tuple[str | None, str | None]:
+def _fallback_data_file_for_symbol(
+    symbol: str,
+    timeframe: str | None = None,
+) -> tuple[str | None, str | None]:
     """Read web_settings.json last_data_file when strategy JSON lacks data_file."""
     settings_path = pathlib.Path("web_settings.json")
     if not settings_path.exists():
@@ -84,6 +96,9 @@ def _fallback_data_file_for_symbol(symbol: str) -> tuple[str | None, str | None]
     except Exception:
         return str(p.resolve()), None
     if info.get("symbol") != symbol:
+        return None, None
+    expected_timeframe = normalize_timeframe(timeframe)
+    if expected_timeframe and info.get("timeframe") != expected_timeframe:
         return None, None
     return str(p.resolve()), info.get("timeframe")
 
@@ -234,10 +249,12 @@ class ConstrainedSampler:
 class AlphaEngine:
     def __init__(self, data_manager=None, use_lord_regularization=True,
                  lord_decay_rate=1e-3, lord_num_iterations=5, n_folds: int = 5,
-                 target_symbol: str | None = None):
+                 target_symbol: str | None = None,
+                 target_timeframe: str | None = None):
         self.data_manager  = data_manager
         self.n_folds       = n_folds
         self.target_symbol = target_symbol   # None = 多品种模式，str = 单品种模式
+        self.target_timeframe = normalize_timeframe(target_timeframe)
         self.model   = AlphaGPT().to(ModelConfig.DEVICE)
         self.opt     = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
 
@@ -435,6 +452,224 @@ class AlphaEngine:
             return {'idx': idx, 'status': 'error', 'reward': -5.0,
                     'val_score': -5.0, 'fml': fml,
                     'error': f'{type(e).__name__}: {e}'}
+
+    @staticmethod
+    def _compute_ic_batch(
+        factors: torch.Tensor,
+        target_ret: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """批量时序 IC，复刻 ``_compute_ic`` 的逐公式语义。
+
+        ``factors`` 为 ``[B,N,T]``，``target_ret`` 为 ``[N,T]``。
+        """
+        batch, _, length = factors.shape
+        if length < 2:
+            zeros = torch.zeros(
+                batch,
+                dtype=factors.dtype,
+                device=factors.device,
+            )
+            return zeros, zeros
+
+        x = factors[:, :, :-1]
+        y = target_ret[:, 1:].unsqueeze(0)
+        x_centered = x - x.mean(dim=2, keepdim=True)
+        y_centered = y - y.mean(dim=2, keepdim=True)
+        sx = (x_centered * x_centered).mean(dim=2).sqrt()
+        sy = (y_centered * y_centered).mean(dim=2).sqrt().expand_as(sx)
+        covariance = (x_centered * y_centered).mean(dim=2)
+        valid = (sx >= 1e-6) & (sy >= 1e-6)
+        ic = covariance / (sx * sy + 1e-8)
+        ic = torch.where(valid, ic, torch.zeros_like(ic))
+
+        count = valid.sum(dim=1)
+        safe_count = count.clamp(min=1).to(factors.dtype)
+        mean = ic.sum(dim=1) / safe_count
+        mean = torch.where(count > 0, mean, torch.zeros_like(mean))
+
+        centered = torch.where(
+            valid,
+            ic - mean.unsqueeze(1),
+            torch.zeros_like(ic),
+        )
+        std = ((centered * centered).sum(dim=1) / safe_count).sqrt()
+        stability = torch.where(
+            count >= 2,
+            mean / (std + 1e-6),
+            torch.zeros_like(mean),
+        )
+        return mean, stability
+
+    @staticmethod
+    def _apply_ic_gate_batch(
+        reward: torch.Tensor,
+        ic_mean: torch.Tensor,
+    ) -> torch.Tensor:
+        threshold = ModelConfig.IC_GATE_THRESH
+        return torch.where(
+            ic_mean > threshold,
+            reward * ModelConfig.IC_GATE_MULT,
+            torch.where(
+                ic_mean < -threshold,
+                reward * ModelConfig.IC_NEG_MULT,
+                reward,
+            ),
+        )
+
+    def _eval_formula_batch(
+        self,
+        formulas: list[list[int]],
+        feat: torch.Tensor,
+        target_ret: torch.Tensor,
+        folds: list[dict],
+    ) -> list[dict]:
+        """批量评估单品种公式的 walk-forward 分数。
+
+        VM 仍逐公式执行以兼容异构 postfix 程序；有效因子随后堆叠为
+        ``[公式,品种,时间]``，仓位、PnL、四折指标和 IC 在一个张量批次中完成。
+        同一批内的重复公式只计算一次，最后按原始顺序展开结果。
+        """
+        original_formulas = formulas
+        unique_formulas: list[list[int]] = []
+        unique_lookup: dict[tuple[int, ...], int] = {}
+        original_to_unique: list[int] = []
+        for formula in original_formulas:
+            key = tuple(formula)
+            unique_idx = unique_lookup.get(key)
+            if unique_idx is None:
+                unique_idx = len(unique_formulas)
+                unique_lookup[key] = unique_idx
+                unique_formulas.append(formula)
+            original_to_unique.append(unique_idx)
+        formulas = unique_formulas
+
+        def expand_results(unique_results: list[dict]) -> list[dict]:
+            by_idx = {result["idx"]: result for result in unique_results}
+            expanded: list[dict] = []
+            for idx, unique_idx in enumerate(original_to_unique):
+                result = dict(by_idx[unique_idx])
+                result["idx"] = idx
+                result["fml"] = original_formulas[idx]
+                expanded.append(result)
+            return expanded
+
+        results: list[dict | None] = [None] * len(formulas)
+        valid_indices: list[int] = []
+        valid_factors: list[torch.Tensor] = []
+
+        for idx, formula in enumerate(formulas):
+            try:
+                with torch.no_grad():
+                    factor = self.vm.execute(formula, feat)
+                if factor is None:
+                    results[idx] = {
+                        'idx': idx, 'status': 'none',
+                        'reward': -5.0, 'val_score': -5.0,
+                        'fml': formula,
+                    }
+                    continue
+                if factor.std() < 1e-4:
+                    results[idx] = {
+                        'idx': idx, 'status': 'const',
+                        'reward': -2.0, 'val_score': -2.0,
+                        'fml': formula,
+                    }
+                    continue
+                valid_indices.append(idx)
+                valid_factors.append(factor)
+            except Exception as exc:
+                results[idx] = {
+                    'idx': idx, 'status': 'error',
+                    'reward': -5.0, 'val_score': -5.0,
+                    'fml': formula,
+                    'error': f'{type(exc).__name__}: {exc}',
+                }
+
+        if not valid_factors:
+            unique_results = [
+                result for result in results if result is not None
+            ]
+            return expand_results(unique_results)
+
+        factor_batch = torch.stack(valid_factors, dim=0)
+        fold_train_scores: list[torch.Tensor] = []
+        fold_val_scores: list[torch.Tensor] = []
+        fold_train_ic: list[torch.Tensor] = []
+
+        with torch.no_grad():
+            for fold in folds:
+                train_score, val_score = self.bt.evaluate_fold_batch(
+                    factor_batch,
+                    target_ret,
+                    fold["train_start"],
+                    fold["train_end"],
+                    fold["val_start"],
+                    fold["val_end"],
+                )
+                train_ic, _ = self._compute_ic_batch(
+                    factor_batch[:, :, fold["train_start"]:fold["train_end"]],
+                    target_ret[:, fold["train_start"]:fold["train_end"]],
+                )
+                val_ic, _ = self._compute_ic_batch(
+                    factor_batch[:, :, fold["val_start"]:fold["val_end"]],
+                    target_ret[:, fold["val_start"]:fold["val_end"]],
+                )
+                fold_train_scores.append(
+                    ModelConfig.REWARD_ALPHA
+                    * self._apply_ic_gate_batch(train_score, train_ic)
+                )
+                fold_val_scores.append(
+                    self._apply_ic_gate_batch(val_score, val_ic)
+                )
+                fold_train_ic.append(train_ic)
+
+            train_scores = torch.stack(fold_train_scores, dim=1).mean(dim=1)
+            val_scores = torch.stack(fold_val_scores, dim=1).mean(dim=1)
+            mean_train_ic = torch.stack(fold_train_ic, dim=1).mean(dim=1)
+            full_ic, full_stability = self._compute_ic_batch(
+                factor_batch,
+                target_ret,
+            )
+
+        correlation_slice = (
+            folds[0]["train_start"],
+            folds[0]["train_end"],
+        )
+        for batch_idx, result_idx in enumerate(valid_indices):
+            formula = formulas[result_idx]
+            factor = valid_factors[batch_idx]
+            reward = train_scores[batch_idx]
+            val_score = val_scores[batch_idx]
+
+            repetition = _repetition_penalty(formula)
+            if repetition > 0:
+                reward = reward - repetition
+                val_score = val_score - repetition
+            reward = self._apply_corr_penalty(
+                reward,
+                factor,
+                correlation_slice,
+            )
+            val_score = self._apply_corr_penalty(
+                val_score,
+                factor,
+                correlation_slice,
+            )
+
+            results[result_idx] = {
+                'idx': result_idx,
+                'status': 'ok',
+                'reward': reward.item(),
+                'val_score': val_score.item(),
+                'ic_full': full_ic[batch_idx].item(),
+                'ic_stab': full_stability[batch_idx].item(),
+                'ic_i': mean_train_ic[batch_idx].item(),
+                'res': factor,
+                'fml': formula,
+            }
+
+        unique_results = [result for result in results if result is not None]
+        return expand_results(unique_results)
 
     # ── IC computation ────────────────────────────────────────────────────────
 
@@ -672,6 +907,11 @@ class AlphaEngine:
         # 每个 t 的归一化参数只用 [t-w+1..t]，walk-forward 折叠切片无泄露
         feat  = self.data_manager.feat_tensor.to(ModelConfig.DEVICE)
         t_ret = self.data_manager.target_ret.to(ModelConfig.DEVICE)
+        if verbose_header:
+            if use_wf and feat.shape[0] == 1:
+                print("   评分模式: 单品种批量张量评分（批内公式去重）")
+            else:
+                print("   评分模式: 逐公式评分（多品种/全量评估兼容路径）")
 
         # 数据驱动年化因子：按训练数据的实际时间戳估计每年 bar 数，
         # 替代 MT5Backtest 默认的 H1=6240。A 股日线/15min、加密日线等
@@ -825,8 +1065,16 @@ class AlphaEngine:
             # factor_pool 快照：所有 worker 看到同一份只读视图
             factor_pool_snapshot = list(self.factor_pool)
 
-            # 并行提交所有公式评估任务
-            if self._eval_pool is not None and self._eval_workers > 1 and tot > 1:
+            # 单品种 walk-forward：先执行异构公式，再批量计算仓位/PnL/四折指标。
+            if use_wf and feat.shape[0] == 1 and tot > 1:
+                results = self._eval_formula_batch(
+                    all_fmls,
+                    feat,
+                    t_ret,
+                    folds,
+                )
+            # 多品种保留原线程池/串行路径，避免改变组合评分语义。
+            elif self._eval_pool is not None and self._eval_workers > 1 and tot > 1:
                 from concurrent.futures import ThreadPoolExecutor
                 futures = [
                     self._eval_pool.submit(
@@ -1044,10 +1292,14 @@ class AlphaEngine:
                 strategy_data = {
                     "vocab_version": VOCAB_VERSION,
                     "symbol": self.target_symbol,
+                    "timeframe": self.target_timeframe,
                     "formula": self.best_formula,
                     "best_score": self.best_score,
                 }
-                save_path = _strategy_file_for_symbol(self.target_symbol)
+                save_path = _strategy_file_for_symbol(
+                    self.target_symbol,
+                    self.target_timeframe,
+                )
                 pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(save_path, "w") as fp:
                     json.dump(strategy_data, fp, indent=2)
@@ -1164,10 +1416,14 @@ class AlphaEngine:
                 strategy_data = {
                     "vocab_version": VOCAB_VERSION,
                     "symbol": self.target_symbol,
+                    "timeframe": self.target_timeframe,
                     "formula": self.best_formula,
                     "best_score": self.best_score,
                 }
-                save_path = _strategy_file_for_symbol(self.target_symbol)
+                save_path = _strategy_file_for_symbol(
+                    self.target_symbol,
+                    self.target_timeframe,
+                )
                 pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
                 # P1-3: 原子写入
                 tmp_path = save_path + ".tmp"
@@ -1178,7 +1434,7 @@ class AlphaEngine:
             sym_tag = f"[{self.target_symbol}] " if self.target_symbol else ""
             self.training_history.pop('_low_entropy_streak', None)
             hist_path = (
-                f"training_history_{self.target_symbol}.json"
+                history_filename(self.target_symbol, self.target_timeframe)
                 if self.target_symbol else "training_history.json"
             )
             # P1-3: 原子写入
@@ -1209,7 +1465,10 @@ class AlphaEngine:
         if not self.target_symbol:
             return
         try:
-            hist_path = f"training_history_{self.target_symbol}.json"
+            hist_path = history_filename(
+                self.target_symbol,
+                self.target_timeframe,
+            )
             payload = {
                 k: v for k, v in self.training_history.items()
                 if k != "_low_entropy_streak"
@@ -1237,7 +1496,10 @@ class AlphaEngine:
             return
         try:
             from .vocab import VOCAB_VERSION
-            save_path = _strategy_file_for_symbol(self.target_symbol)
+            save_path = _strategy_file_for_symbol(
+                self.target_symbol,
+                self.target_timeframe,
+            )
             pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
             existing: dict = {}
@@ -1253,6 +1515,7 @@ class AlphaEngine:
             strategy_data = {
                 "vocab_version": VOCAB_VERSION,
                 "symbol": self.target_symbol,
+                "timeframe": self.target_timeframe,
                 "formula": self.best_formula,
                 "best_score": self.best_score,
                 "formula_decoded": self._decode_formula(self.best_formula),
@@ -1265,7 +1528,10 @@ class AlphaEngine:
                 if val is not None:
                     strategy_data[key] = val
             if not strategy_data.get("data_file") and self.target_symbol:
-                data_file, tf = _fallback_data_file_for_symbol(self.target_symbol)
+                data_file, tf = _fallback_data_file_for_symbol(
+                    self.target_symbol,
+                    self.target_timeframe,
+                )
                 if data_file:
                     strategy_data["data_file"] = data_file
                 if tf and not strategy_data.get("timeframe"):
@@ -1290,10 +1556,19 @@ class AlphaEngine:
     def save_checkpoint(self, step: int, path: str | None = None) -> str:
         _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
         if path is None:
-            sym_tag = f"_{self.target_symbol}" if self.target_symbol else ""
-            path = str(_CHECKPOINT_DIR / f"ckpt{sym_tag}_step_{step:04d}.pt")
+            if self.target_symbol:
+                filename = checkpoint_filename(
+                    self.target_symbol,
+                    self.target_timeframe,
+                    step,
+                )
+            else:
+                filename = f"ckpt_step_{step:04d}.pt"
+            path = str(_CHECKPOINT_DIR / filename)
         ckpt = {
             "step":                 step,
+            "symbol":               self.target_symbol,
+            "timeframe":            self.target_timeframe,
             "vocab_version":        VOCAB_VERSION,   # task 12.2: 版本校验所需
             "model_state_dict":     self.model.state_dict(),
             "optimizer_state_dict": self.opt.state_dict(),
@@ -1331,6 +1606,26 @@ class AlphaEngine:
             )
         # verify() 版本不匹配时抛 VocabVersionMismatchError，拒绝加载
         FORMULA_VOCAB.verify(artifact_version)
+        checkpoint_symbol = ckpt.get("symbol")
+        checkpoint_timeframe = normalize_timeframe(ckpt.get("timeframe"))
+        if (
+            self.target_symbol
+            and checkpoint_symbol
+            and checkpoint_symbol != self.target_symbol
+        ):
+            raise ValueError(
+                f"checkpoint 品种 {checkpoint_symbol} 与当前 "
+                f"{self.target_symbol} 不一致"
+            )
+        if (
+            self.target_timeframe
+            and checkpoint_timeframe
+            and checkpoint_timeframe != self.target_timeframe
+        ):
+            raise ValueError(
+                f"checkpoint 周期 {checkpoint_timeframe} 与当前 "
+                f"{self.target_timeframe} 不一致"
+            )
         # ── 版本校验通过，继续加载 ────────────────────────────────────────
 
         self.model.load_state_dict(ckpt["model_state_dict"], strict=False)

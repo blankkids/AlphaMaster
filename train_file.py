@@ -26,6 +26,11 @@ from data_pipeline.parquet_manager import ParquetDataManager, inspect_parquet_fi
 from model_core.config import ModelConfig
 from model_core.engine import AlphaEngine
 from model_core.vocab import VOCAB_VERSION
+from utils.training_identity import (
+    checkpoint_pattern,
+    history_filename,
+    strategy_filename,
+)
 
 
 def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngine | None:
@@ -54,13 +59,19 @@ def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngin
         print(f"  [错误] 数据加载失败: {e}")
         return None
 
-    engine = AlphaEngine(data_manager=mgr, target_symbol=symbol)
+    engine = AlphaEngine(
+        data_manager=mgr,
+        target_symbol=symbol,
+        target_timeframe=timeframe,
+    )
     engine.timeframe = timeframe
     engine.data_file = str(Path(data_file).resolve())
     engine.mode = "parquet_file"
     engine.train_steps = ModelConfig.TRAIN_STEPS
 
-    ckpt_pattern = str(pathlib.Path("checkpoints") / f"ckpt_{symbol}_step_*.pt")
+    ckpt_pattern = str(
+        pathlib.Path("checkpoints") / checkpoint_pattern(symbol, timeframe)
+    )
     ckpt_files = sorted(_glob.glob(ckpt_pattern))
     start_step = 0
 
@@ -72,7 +83,7 @@ def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngin
                 removed += 1
             except OSError as e:
                 print(f"  [警告] 无法删除检查点 {p}: {e}")
-        hist_path = pathlib.Path(f"training_history_{symbol}.json")
+        hist_path = pathlib.Path(history_filename(symbol, timeframe))
         if hist_path.exists():
             try:
                 hist_path.unlink()
@@ -80,7 +91,7 @@ def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngin
                 pass
         print(f"  [重新训练] 已清除 {removed} 个检查点，从第 0 步开始")
         # 保留已有最优策略作为分数下限，避免开局弱公式覆盖 strategies/best_*.json
-        _seed_best_from_strategy(engine, symbol)
+        _seed_best_from_strategy(engine, symbol, timeframe)
         ckpt_files = []
     elif ckpt_files:
         latest = ckpt_files[-1]
@@ -96,7 +107,7 @@ def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngin
         return engine
 
     if start_step == 0 and not from_scratch:
-        hist_path = pathlib.Path(f"training_history_{symbol}.json")
+        hist_path = pathlib.Path(history_filename(symbol, timeframe))
         if hist_path.exists():
             hist_path.unlink()
         print("  [新训] 从第 0 步开始")
@@ -109,9 +120,21 @@ def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngin
     return engine
 
 
-def _seed_best_from_strategy(engine: AlphaEngine, symbol: str) -> None:
-    """把已有 best_{symbol}.json 当作重新训练的分数下限。"""
-    path = pathlib.Path("strategies") / f"best_{symbol}.json"
+def _seed_best_from_strategy(
+    engine: AlphaEngine,
+    symbol: str,
+    timeframe: str,
+) -> None:
+    """把同品种、同周期策略当作重新训练的分数下限。"""
+    path = pathlib.Path("strategies") / strategy_filename(symbol, timeframe)
+    legacy_path = pathlib.Path("strategies") / strategy_filename(symbol)
+    if not path.exists() and legacy_path.exists():
+        try:
+            legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            legacy = {}
+        if str(legacy.get("timeframe") or "").upper() == timeframe.upper():
+            path = legacy_path
     if not path.exists():
         return
     try:
@@ -132,7 +155,7 @@ def _seed_best_from_strategy(engine: AlphaEngine, symbol: str) -> None:
 
 
 def _save_strategy(engine: AlphaEngine, symbol: str, timeframe: str, data_file: str) -> None:
-    path = pathlib.Path("strategies") / f"best_{symbol}.json"
+    path = pathlib.Path("strategies") / strategy_filename(symbol, timeframe)
     path.parent.mkdir(exist_ok=True)
     # 若磁盘上已有更高分，不要用更弱结果覆盖
     if path.exists() and engine.best_formula is not None:
@@ -200,7 +223,8 @@ if __name__ == "__main__":
 
     if eng:
         sym = eng.target_symbol or "?"
-        print(f"\n<<< [{sym}] 训练完成: 最优分数={eng.best_score:.4f}，耗时 {elapsed/3600:.2f} 小时")
+        tf = eng.target_timeframe or "?"
+        print(f"\n<<< [{sym} {tf}] 训练完成: 最优分数={eng.best_score:.4f}，耗时 {elapsed/3600:.2f} 小时")
         if eng.best_formula:
             print(f"    {eng._decode_formula(eng.best_formula)}")
     else:

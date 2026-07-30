@@ -11,21 +11,28 @@ import torch
 
 from model_core.config import ModelConfig
 from model_core.vocab import FORMULA_VOCAB
+from utils.training_identity import (
+    artifact_tag,
+    checkpoint_pattern,
+    history_filename,
+    normalize_timeframe,
+    safe_artifact_tag,
+    strategy_filename,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
 STRATEGIES_DIR = PROJECT_ROOT / "strategies"
 
 
-def _safe_symbol_tag(symbol: str) -> str:
-    return symbol.replace(".", "_")
-
-
-def checkpoint_glob(symbol: str) -> list[Path]:
-    tag = _safe_symbol_tag(symbol)
+def checkpoint_glob(
+    symbol: str,
+    timeframe: str | None = None,
+) -> list[Path]:
+    safe_identity = safe_artifact_tag(symbol, timeframe)
     patterns = [
-        f"ckpt_{symbol}_step_*.pt",
-        f"ckpt_{tag}_step_*.pt",
+        checkpoint_pattern(symbol, timeframe),
+        f"ckpt_{safe_identity}_step_*.pt",
     ]
     found: list[Path] = []
     for pattern in patterns:
@@ -41,6 +48,7 @@ def _step_from_name(path: Path) -> int:
 @dataclass
 class SymbolProgress:
     symbol: str
+    timeframe: str | None
     train_steps: int
     current_step: int
     best_score: float | None
@@ -86,6 +94,8 @@ def _load_checkpoint_meta(path: Path) -> dict[str, Any]:
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     meta = {
         "step": int(ckpt.get("step", _step_from_name(path))),
+        "symbol": ckpt.get("symbol"),
+        "timeframe": normalize_timeframe(ckpt.get("timeframe")),
         "best_score": ckpt.get("best_score"),
         "best_formula": ckpt.get("best_formula"),
         "training_history": ckpt.get("training_history") or {},
@@ -104,8 +114,25 @@ def _decode_formula(tokens: list[int] | None) -> str | None:
         return str(tokens)
 
 
-def _load_strategy(symbol: str) -> dict[str, Any] | None:
-    path = STRATEGIES_DIR / f"best_{symbol}.json"
+def _load_strategy(
+    symbol: str,
+    timeframe: str | None = None,
+) -> dict[str, Any] | None:
+    expected_timeframe = normalize_timeframe(timeframe)
+    path = STRATEGIES_DIR / strategy_filename(symbol, expected_timeframe)
+    if expected_timeframe and not path.exists():
+        legacy_path = STRATEGIES_DIR / strategy_filename(symbol)
+        if legacy_path.exists():
+            try:
+                legacy_data = json.loads(legacy_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                legacy_data = None
+            if (
+                isinstance(legacy_data, dict)
+                and normalize_timeframe(legacy_data.get("timeframe"))
+                == expected_timeframe
+            ):
+                return legacy_data
     if not path.exists():
         return None
     try:
@@ -130,10 +157,14 @@ def _pick_training_history(
     return file_history if file_n >= ckpt_n else ckpt_history
 
 
-def get_symbol_progress(symbol: str) -> SymbolProgress:
+def get_symbol_progress(
+    symbol: str,
+    timeframe: str | None = None,
+) -> SymbolProgress:
+    timeframe = normalize_timeframe(timeframe)
     train_steps = ModelConfig.TRAIN_STEPS
-    strategy = _load_strategy(symbol)
-    ckpts = checkpoint_glob(symbol)
+    strategy = _load_strategy(symbol, timeframe)
+    ckpts = checkpoint_glob(symbol, timeframe)
 
     current_step = 0
     best_score = None
@@ -142,7 +173,7 @@ def get_symbol_progress(symbol: str) -> SymbolProgress:
     ckpt_path: str | None = None
     ckpt_mtime: float | None = None
 
-    hist_file = PROJECT_ROOT / f"training_history_{symbol}.json"
+    hist_file = PROJECT_ROOT / history_filename(symbol, timeframe)
     file_history: dict[str, Any] | None = None
     if hist_file.exists():
         try:
@@ -180,6 +211,7 @@ def get_symbol_progress(symbol: str) -> SymbolProgress:
 
     return SymbolProgress(
         symbol=symbol,
+        timeframe=timeframe,
         train_steps=train_steps,
         current_step=current_step,
         best_score=best_score,
@@ -193,10 +225,14 @@ def get_symbol_progress(symbol: str) -> SymbolProgress:
     )
 
 
-def get_strategy_for_export(symbol: str) -> dict[str, Any]:
-    data = _load_strategy(symbol)
+def get_strategy_for_export(
+    symbol: str,
+    timeframe: str | None = None,
+) -> dict[str, Any]:
+    data = _load_strategy(symbol, timeframe)
     if not data:
-        raise FileNotFoundError(f"未找到 {symbol} 的策略，请先完成训练")
+        identity = artifact_tag(symbol, timeframe)
+        raise FileNotFoundError(f"未找到 {identity} 的策略，请先完成训练")
     out = dict(data)
     formula = out.get("formula")
     if formula and not out.get("formula_decoded"):
@@ -208,9 +244,10 @@ def build_strategy_export_filename(
     symbol: str,
     step: int,
     score: float | None,
+    timeframe: str | None = None,
 ) -> str:
     """e.g. strategy_ADAUSD_step0084_score2.4021.json"""
-    safe = symbol.replace(".", "_")
+    safe = safe_artifact_tag(symbol, timeframe)
     step_part = f"step{max(0, int(step)):04d}"
     if score is not None:
         return f"strategy_{safe}_{step_part}_score{float(score):.4f}.json"

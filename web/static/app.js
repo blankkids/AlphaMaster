@@ -1,6 +1,7 @@
 const API = "";
 let selectedDataFile = null;
 let selectedSymbol = null;
+let selectedTimeframe = null;
 let selectedStrategyFile = null;
 let strategyUploadTarget = "backtest";
 let selectedStrategySymbol = null;
@@ -244,6 +245,7 @@ function renderDataFileCard(info) {
     card.innerHTML = '<div class="data-file-empty">尚未选择数据文件</div>';
     selectedDataFile = null;
     selectedSymbol = null;
+    selectedTimeframe = null;
     startBtn.disabled = true;
     if ($("retrainBtn")) $("retrainBtn").disabled = true;
     if ($("exportBtn")) $("exportBtn").disabled = true;
@@ -254,6 +256,7 @@ function renderDataFileCard(info) {
 
   selectedDataFile = info.data_file;
   selectedSymbol = info.symbol || null;
+  selectedTimeframe = info.timeframe || null;
 
   if (info.valid === false) {
     card.className = "data-file-card invalid";
@@ -348,6 +351,7 @@ async function selectHistoricalDataFile(event) {
     });
     renderDataFileCard(res);
     selectedSymbol = res.symbol || null;
+    selectedTimeframe = res.timeframe || null;
     await refreshDataFileHistory(res.data_file);
     await refreshOverview();
   } catch (e) {
@@ -644,11 +648,13 @@ function renderChart(history, label, progress) {
   $("chartHint").textContent = `${steps.length} 个记录点`;
 }
 
-async function loadSymbolChart(symbol, progress) {
+async function loadSymbolChart(symbol, timeframe, progress) {
   if (!symbol) return;
   try {
-    const data = await fetchJSON(`/api/symbols/${encodeURIComponent(symbol)}`);
-    renderChart(data.history, symbol, progress || data);
+    const query = timeframe ? `?timeframe=${encodeURIComponent(timeframe)}` : "";
+    const data = await fetchJSON(`/api/symbols/${encodeURIComponent(symbol)}${query}`);
+    const label = timeframe ? `${symbol} ${timeframe}` : symbol;
+    renderChart(data.history, label, progress || data);
     $("formulaText").textContent = data.formula_decoded || "—";
   } catch (e) {
     $("formulaText").textContent = "—";
@@ -743,6 +749,10 @@ async function refreshOverview() {
   renderStrategies(strategies.strategies);
 
   const sym = overview.progress?.symbol || selectedSymbol || training?.job?.symbol;
+  const timeframe =
+    overview.progress?.timeframe ||
+    selectedTimeframe ||
+    training?.job?.timeframe;
   const trainingActive = !!training?.active;
   if (lastTrainingActive && !trainingActive && sym) {
     await applyBestStrategyForBacktest(sym, null);
@@ -750,7 +760,7 @@ async function refreshOverview() {
   lastTrainingActive = trainingActive;
 
   if (sym && (training?.active || overview.progress)) {
-    await loadSymbolChart(sym, overview.progress);
+    await loadSymbolChart(sym, timeframe, overview.progress);
   }
 
   await refreshDebugLogs();
@@ -1018,7 +1028,8 @@ async function applyBestStrategyForBacktest(symbol, strategyFile) {
   if (!symbol) return;
   try {
     const res = await fetchJSON(
-      `/api/strategy-file/sync-best?symbol=${encodeURIComponent(symbol)}`,
+      `/api/strategy-file/sync-best?symbol=${encodeURIComponent(symbol)}` +
+        (selectedTimeframe ? `&timeframe=${encodeURIComponent(selectedTimeframe)}` : ""),
       { method: "POST" }
     );
     renderStrategyFileCard(res);
@@ -1058,8 +1069,9 @@ async function handleDataFileUpload(event) {
     });
     renderDataFileCard(res);
     selectedSymbol = res.symbol;
+    selectedTimeframe = res.timeframe || null;
     await refreshDataFileHistory(res.data_file);
-    await loadSymbolChart(res.symbol);
+    await loadSymbolChart(res.symbol, res.timeframe);
   } catch (e) {
     $("debugView").scrollIntoView({ behavior: "smooth", block: "nearest" });
   } finally {
@@ -1079,6 +1091,7 @@ async function startTraining() {
       body: JSON.stringify({ data_file: selectedDataFile, from_scratch: false }),
     });
     selectedSymbol = res.data_file?.symbol || res.job?.symbol;
+    selectedTimeframe = res.data_file?.timeframe || res.job?.timeframe || null;
     renderDataFileCard(res.data_file);
     await refreshOverview();
   } catch (e) {
@@ -1092,7 +1105,7 @@ async function retrainFromScratch() {
     return;
   }
   const ok = window.confirm(
-    "重新训练会清除该品种的检查点，从第 0 步重新搜索。\n" +
+    "重新训练会清除该品种、该周期的检查点，从第 0 步重新搜索。\n" +
       "已有的更优策略会保留，只有挖到更高分才会覆盖。\n\n" +
       "确定要重新训练吗？"
   );
@@ -1104,6 +1117,7 @@ async function retrainFromScratch() {
       body: JSON.stringify({ data_file: selectedDataFile, from_scratch: true }),
     });
     selectedSymbol = res.data_file?.symbol || res.job?.symbol;
+    selectedTimeframe = res.data_file?.timeframe || res.job?.timeframe || null;
     renderDataFileCard(res.data_file);
     await refreshOverview();
   } catch (e) {
@@ -1113,7 +1127,14 @@ async function retrainFromScratch() {
 
 function updateExportBtn(progress, strategies) {
   const sym = progress?.symbol || selectedSymbol;
-  const hasStrategy = progress?.has_strategy || (strategies || []).some((s) => s.symbol === sym);
+  const timeframe = progress?.timeframe || selectedTimeframe;
+  const hasStrategy =
+    progress?.has_strategy ||
+    (strategies || []).some(
+      (s) =>
+        s.symbol === sym &&
+        (!timeframe || String(s.timeframe || "").toUpperCase() === String(timeframe).toUpperCase())
+    );
   const btn = $("exportBtn");
   if (btn) btn.disabled = !sym || !hasStrategy;
 }
@@ -1131,7 +1152,7 @@ function updateTrainingBtns(progress, training) {
   } else if (active) {
     exportTitle = "训练进行中，请停止后再导出";
   } else if (!hasCheckpoint) {
-    exportTitle = "该品种尚无检查点：至少训练满 20 步后才会生成（每 20 步保存一次）";
+    exportTitle = "该品种、该周期尚无检查点：至少训练满 20 步后才会生成（每 20 步保存一次）";
   }
 
   if (exportBtn) {
@@ -1150,7 +1171,10 @@ async function exportTraining() {
     await logClientError("请先选择数据文件");
     return;
   }
-  const path = `/api/training/${encodeURIComponent(sym)}/export`;
+  const query = selectedTimeframe
+    ? `?timeframe=${encodeURIComponent(selectedTimeframe)}`
+    : "";
+  const path = `/api/training/${encodeURIComponent(sym)}/export${query}`;
   try {
     const res = await fetch(API + path);
     if (!res.ok) {
@@ -1160,7 +1184,8 @@ async function exportTraining() {
     const blob = await res.blob();
     const disp = res.headers.get("Content-Disposition") || "";
     const m = /filename="([^"]+)"/.exec(disp);
-    const filename = m ? m[1] : `training_${sym.replace(/\./g, "_")}.zip`;
+    const identity = selectedTimeframe ? `${sym}_${selectedTimeframe}` : sym;
+    const filename = m ? m[1] : `training_${identity.replace(/\./g, "_")}.zip`;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -1198,7 +1223,10 @@ async function handleImportTrainingFile(event) {
   form.append("file", file);
 
   try {
-    const res = await fetch(`${API}/api/training/import?symbol=${encodeURIComponent(sym)}`, {
+    const query =
+      `symbol=${encodeURIComponent(sym)}` +
+      (selectedTimeframe ? `&timeframe=${encodeURIComponent(selectedTimeframe)}` : "");
+    const res = await fetch(`${API}/api/training/import?${query}`, {
       method: "POST",
       body: form,
     });
@@ -1209,6 +1237,7 @@ async function handleImportTrainingFile(event) {
     if (data.symbol && data.symbol !== sym) {
       selectedSymbol = data.symbol;
     }
+    if (data.timeframe) selectedTimeframe = data.timeframe;
     clientErrors.push(`[${new Date().toLocaleString()}] ${data.message || "训练文件导入成功"}`);
     if (clientErrors.length > 80) clientErrors = clientErrors.slice(-80);
     renderDebugView();
@@ -1235,7 +1264,10 @@ async function exportStrategy() {
     await logClientError("请先选择数据文件");
     return;
   }
-  const path = `/api/strategies/${encodeURIComponent(sym)}/export`;
+  const query = selectedTimeframe
+    ? `?timeframe=${encodeURIComponent(selectedTimeframe)}`
+    : "";
+  const path = `/api/strategies/${encodeURIComponent(sym)}/export${query}`;
   try {
     const res = await fetch(API + path);
     if (!res.ok) {
@@ -1248,7 +1280,9 @@ async function exportStrategy() {
     a.href = url;
     a.download =
       parseContentDispositionFilename(res.headers.get("Content-Disposition")) ||
-      `strategy_${sym.replace(/\./g, "_")}.json`;
+      `strategy_${(
+        selectedTimeframe ? `${sym}_${selectedTimeframe}` : sym
+      ).replace(/\./g, "_")}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
