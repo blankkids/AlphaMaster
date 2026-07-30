@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from web.paper_trading import PaperAccount
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_PATH = PROJECT_ROOT / "web_settings.json"
 STRATEGIES_DIR = PROJECT_ROOT / "strategies"
@@ -183,6 +185,7 @@ def load_settings() -> dict:
                     "timeframe": tf,
                     "strategy_file": sf,
                     "refresh_seconds": _as_refresh_seconds(w.get("refresh_seconds")),
+                    "paper": PaperAccount.from_dict(w.get("paper")).to_dict(),
                 }
             )
     out["realtime_watches"] = cleaned
@@ -262,6 +265,7 @@ def save_settings(data: dict) -> dict:
                         "timeframe": tf,
                         "strategy_file": sf,
                         "refresh_seconds": _as_refresh_seconds(w.get("refresh_seconds")),
+                        "paper": PaperAccount.from_dict(w.get("paper")).to_dict(),
                     }
                 )
         current["realtime_watches"] = cleaned

@@ -144,6 +144,8 @@ def evaluate_signal(
         "direction": direction,
         "strength": round(strength, 4),
         "position": round(position, 4),
+        # 模拟交易使用完整精度，与回测的 tanh(factor) 连续仓位保持一致。
+        "target_position": position,
         "factor_value": round(factor_last, 6),
         "threshold": thr,
         "bars_used": n_bars,

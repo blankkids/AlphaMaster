@@ -488,6 +488,17 @@
               </select>
             </div>
           </label>
+          <label class="rt-field">
+            <span>模拟交易金额</span>
+            <input type="number" id="rtPaperAmountInput" value="100000" min="1" step="1000" inputmode="decimal" />
+          </label>
+          <label class="rt-field">
+            <span>模拟执行</span>
+            <select id="rtPaperModeSelect">
+              <option value="T+0">T+0（回测：下一根开盘）</option>
+              <option value="T+1">T+1（再延后一根开盘）</option>
+            </select>
+          </label>
           <label class="rt-field rt-field-wide">
             <span>因子来源</span>
             <select id="rtStrategySelect"></select>
@@ -557,6 +568,78 @@
             </li>
           </ol>
         </details>
+      </section>
+
+      <section class="panel rt-paper-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <div class="panel-head">
+          <div>
+            <h2>模拟交易</h2>
+            <p class="rt-data-desc">每个监控项使用独立资金、持仓、成交记录和收益曲线，不会触发真实下单。</p>
+          </div>
+          <span class="hint" id="rtPaperHint">等待监控信号</span>
+        </div>
+        <div class="rt-paper-toolbar">
+          <label class="rt-field rt-field-wide">
+            <span>查看监控账户</span>
+            <select id="rtPaperWatchSelect"></select>
+          </label>
+          <label class="rt-field">
+            <span>交易金额</span>
+            <input type="number" id="rtPaperEditAmount" min="1" step="1000" inputmode="decimal" />
+          </label>
+          <label class="rt-field">
+            <span>执行模式</span>
+            <select id="rtPaperEditMode">
+              <option value="T+0">T+0（回测：下一根开盘）</option>
+              <option value="T+1">T+1（再延后一根开盘）</option>
+            </select>
+          </label>
+          <div class="rt-actions">
+            <button type="button" class="btn btn-secondary" id="rtPaperApplyBtn">应用并重置</button>
+            <button type="button" class="btn btn-secondary" id="rtPaperResetBtn">重置账户</button>
+          </div>
+        </div>
+        <div class="rt-paper-summary" id="rtPaperSummary">
+          <div class="metric-empty">添加监控后，将按信号自动进行独立模拟交易。</div>
+        </div>
+        <div class="rt-paper-layout">
+          <div class="rt-paper-chart-card">
+            <div class="rt-paper-subhead">
+              <strong>收益曲线</strong>
+              <span id="rtPaperCurveHint">暂无结算点</span>
+            </div>
+            <div class="rt-paper-chart-wrap">
+              <canvas id="rtPaperChart"></canvas>
+            </div>
+          </div>
+          <div class="rt-paper-trades-card">
+            <div class="rt-paper-subhead">
+              <strong>成交记录</strong>
+              <span>最近 200 笔</span>
+            </div>
+            <div class="rt-paper-trades-wrap">
+              <table class="rt-paper-trades">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>操作</th>
+                    <th>价格</th>
+                    <th>成交金额</th>
+                    <th>交易成本</th>
+                    <th>目标仓位</th>
+                    <th>账户收益</th>
+                  </tr>
+                </thead>
+                <tbody id="rtPaperTradesBody">
+                  <tr><td colspan="7">暂无成交</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <small class="field-hint">严格沿用策略回测口径：连续仓位 = tanh(因子)，信号使用后续 K 线开盘价成交，并按最近回测设置扣除单边手续费与滑点。T+1 会在回测默认延迟上再延后一根 K 线。</small>
       </section>
 
       <section class="panel rt-data-panel">

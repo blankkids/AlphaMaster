@@ -21,6 +21,12 @@ from model_core.vocab import VOCAB_VERSION
 from strategy_manager.live_signal import evaluate_signal, min_exposure
 from web.data_sources.base import bars_to_raw_dict
 from web.data_sources.factory import SOURCE_KINDS, get_source
+from web.paper_trading import (
+    DEFAULT_PAPER_AMOUNT,
+    PaperAccount,
+    normalize_paper_amount,
+    normalize_paper_mode,
+)
 from web.settings import load_settings, save_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -166,15 +172,19 @@ def _load_backtest_metrics(
 
     win_rate = _metric_float(row.get("win_rate"), minimum=0.0, maximum=1.0)
     profit_loss_ratio = _metric_float(row.get("profit_loss_ratio"), minimum=0.0)
+    cost_rate = _metric_float(row.get("cost_rate"), minimum=0.0, maximum=1.0)
     n_trades = _metric_int(row.get("n_trades"))
     if win_rate is None and profit_loss_ratio is None:
         return {}
-    return {
+    result = {
         "win_rate": win_rate,
         "profit_loss_ratio": profit_loss_ratio,
         "n_trades": n_trades,
         "performance_source": "latest_backtest",
     }
+    if cost_rate is not None:
+        result["cost_rate"] = cost_rate
+    return result
 
 
 def _load_strategy_meta(path: str) -> dict[str, Any]:
@@ -189,6 +199,7 @@ def _load_strategy_meta(path: str) -> dict[str, Any]:
             "win_rate": None,
             "profit_loss_ratio": None,
             "n_trades": None,
+            "cost_rate": None,
             "performance_source": None,
         }
     formula = data.get("formula")
@@ -216,6 +227,7 @@ def _load_strategy_meta(path: str) -> dict[str, Any]:
         "win_rate": metrics.get("win_rate"),
         "profit_loss_ratio": metrics.get("profit_loss_ratio"),
         "n_trades": metrics.get("n_trades"),
+        "cost_rate": metrics.get("cost_rate"),
         "performance_source": metrics.get("performance_source"),
     }
 
@@ -275,6 +287,7 @@ class WatchTask:
     evaluating: bool = False
     history: deque = field(default_factory=lambda: deque(maxlen=_HISTORY_LEN))
     data_snapshot: dict[str, Any] | None = None
+    paper: PaperAccount = field(default_factory=PaperAccount)
 
     def to_public(self) -> dict[str, Any]:
         now = time.time()
@@ -318,6 +331,7 @@ class WatchTask:
             "threshold": min_exposure(),
             "history": list(self.history),
             "data_snapshot": self.data_snapshot,
+            "paper": self.paper.to_public(),
         }
 
     def persist_dict(self) -> dict[str, Any]:
@@ -328,6 +342,7 @@ class WatchTask:
             "timeframe": self.timeframe,
             "strategy_file": self.strategy_file,
             "refresh_seconds": self.cadence_s,
+            "paper": self.paper.to_dict(),
         }
 
 
@@ -358,6 +373,7 @@ class RealtimeManager:
                     w["source"], w["symbol"], w["timeframe"], w["strategy_file"],
                     persist=False,
                     refresh_seconds=w.get("refresh_seconds", DEFAULT_REFRESH_SECONDS),
+                    paper_state=w.get("paper"),
                 )
             except Exception:
                 continue
@@ -375,6 +391,8 @@ class RealtimeManager:
         timeframe: str,
         strategy_file: str,
         refresh_seconds: int = DEFAULT_REFRESH_SECONDS,
+        paper_amount: float = DEFAULT_PAPER_AMOUNT,
+        paper_mode: str = "T+0",
     ) -> dict[str, Any]:
         task = self._add_task_internal(
             source,
@@ -383,6 +401,8 @@ class RealtimeManager:
             strategy_file,
             persist=True,
             refresh_seconds=refresh_seconds,
+            paper_amount=paper_amount,
+            paper_mode=paper_mode,
         )
         self._ensure_thread()
         return task.to_public()
@@ -395,11 +415,21 @@ class RealtimeManager:
         strategy_file: str,
         persist: bool,
         refresh_seconds: int = DEFAULT_REFRESH_SECONDS,
+        paper_amount: float = DEFAULT_PAPER_AMOUNT,
+        paper_mode: str = "T+0",
+        paper_state: dict[str, Any] | None = None,
     ) -> WatchTask:
         source = (source or "").strip()
         symbol = (symbol or "").strip()
         timeframe = (timeframe or "").strip()
         refresh_seconds = _normalize_refresh_seconds(refresh_seconds)
+        paper_amount = normalize_paper_amount(paper_amount)
+        paper_mode = normalize_paper_mode(paper_mode)
+        settings = load_settings()
+        fallback_cost_rate = (
+            float(settings.get("bt_commission_pct", 0.02))
+            + float(settings.get("bt_slippage_pct", 0.01))
+        ) / 100.0
         if source not in _VALID_KINDS:
             raise ValueError(f"未知数据源: {source}")
         if not symbol:
@@ -447,12 +477,47 @@ class RealtimeManager:
             performance_source=meta.get("performance_source"),
             warn=warn,
             next_due=0.0,
+            paper=PaperAccount.from_dict(
+                paper_state,
+                default_amount=paper_amount,
+                default_mode=paper_mode,
+                default_cost_rate=(
+                    meta["cost_rate"]
+                    if meta.get("cost_rate") is not None
+                    else fallback_cost_rate
+                ),
+            ),
         )
         with self._lock:
             self._tasks[task_id] = task
             if persist:
                 self._persist()
         return task
+
+    def configure_paper(
+        self,
+        task_id: str,
+        *,
+        amount: float,
+        mode: str,
+    ) -> dict[str, Any]:
+        """Apply paper settings and reset this watch's independent account."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise ValueError("监控项不存在")
+            task.paper.reset(amount=amount, mode=mode)
+            self._persist()
+            return task.paper.to_public()
+
+    def reset_paper(self, task_id: str) -> dict[str, Any]:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise ValueError("监控项不存在")
+            task.paper.reset()
+            self._persist()
+            return task.paper.to_public()
 
     def remove_watch(self, task_id: str) -> bool:
         with self._lock:
@@ -476,6 +541,7 @@ class RealtimeManager:
         if mtime_ns == self._backtest_report_mtime_ns:
             return
         self._backtest_report_mtime_ns = mtime_ns
+        paper_rules_changed = False
         for task in self._tasks.values():
             if task.performance_source == "strategy_file":
                 continue
@@ -485,11 +551,21 @@ class RealtimeManager:
                 task.profit_loss_ratio = metrics.get("profit_loss_ratio")
                 task.n_trades = metrics.get("n_trades")
                 task.performance_source = metrics.get("performance_source")
+                new_cost_rate = metrics.get("cost_rate")
+                if (
+                    new_cost_rate is not None
+                    and not math.isclose(task.paper.cost_rate, new_cost_rate)
+                ):
+                    task.paper.cost_rate = float(new_cost_rate)
+                    task.paper.reset()
+                    paper_rules_changed = True
             elif task.performance_source == "latest_backtest":
                 task.win_rate = None
                 task.profit_loss_ratio = None
                 task.n_trades = None
                 task.performance_source = None
+        if paper_rules_changed:
+            self._persist()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -602,6 +678,13 @@ class RealtimeManager:
                 task.position = result["position"]
                 task.factor_value = result["factor_value"]
                 task.history.append(round(result["strength"], 4))
+                with self._lock:
+                    if task.paper.process_signal(
+                        bar_ts=last_ts,
+                        price=bars[-1].open,
+                        target_position=result.get("target_position", task.position),
+                    ):
+                        self._persist()
                 # 已有上次方向且发生转折时推飞书（首次算出方向不打扰）
                 if prev_dir and new_dir and prev_dir != new_dir:
                     try:

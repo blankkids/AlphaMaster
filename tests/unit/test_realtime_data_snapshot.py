@@ -82,7 +82,10 @@ def test_watch_exposes_and_persists_refresh_seconds() -> None:
     assert public["win_rate"] == 0.56
     assert public["profit_loss_ratio"] == 1.7
     assert public["n_trades"] == 114
+    assert public["paper"]["amount"] == 100_000
+    assert public["paper"]["mode"] == "T+0"
     assert task.persist_dict()["refresh_seconds"] == 5
+    assert task.persist_dict()["paper"]["amount"] == 100_000
 
 
 def test_backtest_metrics_require_same_symbol_and_formula(tmp_path: Path) -> None:
@@ -96,6 +99,7 @@ def test_backtest_metrics_require_same_symbol_and_formula(tmp_path: Path) -> Non
                         "win_rate": 0.56,
                         "profit_loss_ratio": 1.7,
                         "n_trades": 114,
+                        "cost_rate": 0.0008,
                     }
                 }
             }
@@ -109,6 +113,7 @@ def test_backtest_metrics_require_same_symbol_and_formula(tmp_path: Path) -> Non
         "win_rate": 0.56,
         "profit_loss_ratio": 1.7,
         "n_trades": 114,
+        "cost_rate": 0.0008,
         "performance_source": "latest_backtest",
     }
 
@@ -207,3 +212,70 @@ def test_realtime_status_exposes_snapshot_even_when_history_is_insufficient() ->
     assert watch["state"] == "insufficient"
     assert watch["data_snapshot"]["bar_count"] == 2
     assert watch["data_snapshot"]["latest_bar"]["close"] == 11.5
+
+
+def test_realtime_signal_updates_paper_account_once_per_closed_bar() -> None:
+    manager = RealtimeManager()
+    task = _task()
+    manager._tasks[task.id] = task
+    manager._get_bars = lambda *_args: _bars()
+    signal = {
+        "state": "ok",
+        "bars_used": 2,
+        "message": "",
+        "direction": "LONG",
+        "strength": 0.5,
+        "position": 0.5,
+        "factor_value": 0.25,
+    }
+
+    with (
+        patch("web.realtime_manager.evaluate_signal", return_value=signal),
+        patch.object(manager, "_persist"),
+    ):
+        manager._evaluate_task(task)
+        manager._evaluate_task(task)
+
+    assert task.paper.last_bar_ts == _bars()[-1].ts
+    assert task.paper.last_price == _bars()[-1].open
+    assert task.paper.pending_position == pytest.approx(0.5)
+    assert len(task.paper.trades) == 0
+    assert len(task.paper.equity_curve) == 1
+
+
+def test_new_backtest_cost_resets_paper_account_to_avoid_mixed_rules(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "multi_factor_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "symbols": {
+                    "159170": {
+                        "formula": [0],
+                        "win_rate": 0.6,
+                        "profit_loss_ratio": 1.8,
+                        "n_trades": 20,
+                        "cost_rate": 0.001,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = RealtimeManager()
+    task = _task()
+    task.paper.cost_rate = 0.0003
+    task.paper.process_signal(bar_ts=100, price=10, target_position=0.5)
+    manager._tasks[task.id] = task
+
+    with (
+        patch("web.realtime_manager.BACKTEST_REPORT_PATH", report_path),
+        patch.object(manager, "_persist"),
+    ):
+        manager.status()
+
+    assert task.paper.cost_rate == 0.001
+    assert task.paper.last_bar_ts is None
+    assert task.paper.pending_position is None
+    assert task.paper.equity_curve == []

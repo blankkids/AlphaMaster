@@ -66,6 +66,11 @@ from web.realtime_manager import (
     MIN_REFRESH_SECONDS,
     realtime_manager,
 )
+from web.paper_trading import (
+    DEFAULT_PAPER_AMOUNT,
+    MAX_PAPER_AMOUNT,
+    MIN_PAPER_AMOUNT,
+)
 from web.data_sources.factory import list_sources
 from strategy_manager.live_signal import min_exposure
 
@@ -138,9 +143,25 @@ class AddWatchRequest(BaseModel):
         ge=MIN_REFRESH_SECONDS,
         le=MAX_REFRESH_SECONDS,
     )
+    paper_amount: float = Field(
+        default=DEFAULT_PAPER_AMOUNT,
+        ge=MIN_PAPER_AMOUNT,
+        le=MAX_PAPER_AMOUNT,
+    )
+    paper_mode: str = "T+0"
 
 
 class RemoveWatchRequest(BaseModel):
+    id: str
+
+
+class PaperConfigRequest(BaseModel):
+    id: str
+    amount: float = Field(ge=MIN_PAPER_AMOUNT, le=MAX_PAPER_AMOUNT)
+    mode: str
+
+
+class PaperResetRequest(BaseModel):
     id: str
 
 
@@ -1380,6 +1401,8 @@ def api_realtime_watch(req: AddWatchRequest) -> dict[str, Any]:
             req.timeframe,
             req.strategy_file,
             req.refresh_seconds,
+            req.paper_amount,
+            req.paper_mode,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -1390,6 +1413,28 @@ def api_realtime_watch(req: AddWatchRequest) -> dict[str, Any]:
 def api_realtime_unwatch(req: RemoveWatchRequest) -> dict[str, Any]:
     removed = realtime_manager.remove_watch(req.id)
     return {"ok": removed}
+
+
+@app.put("/api/realtime/paper")
+def api_realtime_paper_config(req: PaperConfigRequest) -> dict[str, Any]:
+    try:
+        paper = realtime_manager.configure_paper(
+            req.id,
+            amount=req.amount,
+            mode=req.mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "paper": paper}
+
+
+@app.post("/api/realtime/paper/reset")
+def api_realtime_paper_reset(req: PaperResetRequest) -> dict[str, Any]:
+    try:
+        paper = realtime_manager.reset_paper(req.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "paper": paper}
 
 
 @app.post("/api/realtime/start")

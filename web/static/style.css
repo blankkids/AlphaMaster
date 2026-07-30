@@ -2255,8 +2255,152 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
   line-height: 1.4;
 }
 
+.rt-paper-panel .panel-head {
+  align-items: flex-start;
+  gap: 18px;
+}
+
+.rt-paper-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 14px;
+  margin-bottom: 16px;
+  padding: 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: rgba(8, 12, 20, 0.46);
+}
+
+.rt-paper-summary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.rt-paper-stat {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(130, 150, 180, 0.15);
+  border-radius: 10px;
+  background: linear-gradient(155deg, rgba(14, 20, 31, 0.82), rgba(8, 12, 20, 0.56));
+}
+
+.rt-paper-stat span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: 0.67rem;
+  letter-spacing: 0.04em;
+}
+
+.rt-paper-stat b {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.92rem;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rt-paper-stat.is-profit b { color: var(--success); }
+.rt-paper-stat.is-loss b { color: var(--danger); }
+.rt-paper-stat.is-long b { color: var(--success); }
+.rt-paper-stat.is-short b { color: var(--danger); }
+
+.rt-paper-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(520px, 1.4fr);
+  gap: 14px;
+}
+
+.rt-paper-chart-card,
+.rt-paper-trades-card {
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: rgba(8, 12, 20, 0.55);
+  overflow: hidden;
+}
+
+.rt-paper-subhead {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 13px;
+  border-bottom: 1px solid rgba(130, 150, 180, 0.12);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-family: var(--mono);
+}
+
+.rt-paper-subhead strong {
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.82rem;
+}
+
+.rt-paper-chart-wrap {
+  position: relative;
+  height: 280px;
+  padding: 12px;
+}
+
+.rt-paper-trades-wrap {
+  max-height: 304px;
+  overflow: auto;
+}
+
+.rt-paper-trades {
+  width: 100%;
+  min-width: 780px;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+
+.rt-paper-trades th,
+.rt-paper-trades td {
+  padding: 10px 11px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid rgba(130, 150, 180, 0.1);
+}
+
+.rt-paper-trades th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--text-muted);
+  font-weight: 500;
+  background: rgba(14, 20, 31, 0.98);
+}
+
+.rt-paper-trades th:first-child,
+.rt-paper-trades td:first-child,
+.rt-paper-trades th:nth-child(2),
+.rt-paper-trades td:nth-child(2) {
+  text-align: left;
+}
+
+.rt-paper-trades tbody tr:last-child td { border-bottom: 0; }
+.rt-paper-trades tbody tr:hover { background: rgba(94, 234, 212, 0.035); }
+.rt-paper-buy { color: var(--success); }
+.rt-paper-sell { color: var(--danger); }
+.rt-paper-profit { color: var(--success); }
+.rt-paper-loss { color: var(--danger); }
+
+@media (max-width: 1050px) {
+  .rt-paper-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .rt-paper-layout { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 680px) {
-  .rt-radar-panel .panel-head {
+  .rt-radar-panel .panel-head,
+  .rt-paper-panel .panel-head {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -2274,6 +2418,11 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
     min-width: 0;
     width: 100%;
   }
+
+  .rt-paper-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rt-paper-toolbar .rt-field { flex: 1 1 100%; }
+  .rt-paper-toolbar .rt-actions { width: 100%; }
+  .rt-paper-toolbar .rt-actions .btn { flex: 1; }
 }
 
 .rt-feishu-panel {

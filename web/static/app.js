@@ -2063,6 +2063,10 @@ let rtSourceById = {};
 let rtImportedStrategy = null; // {path, name}
 let rtGridSig = "";
 let rtDataSig = "";
+let rtPaperSig = "";
+let rtPaperChartSig = "";
+let rtPaperChart = null;
+let rtPaperSelectedId = "";
 let rtLastWatches = [];
 let rtServerSkew = 0; // server_time - local_now（秒）
 let rtCountdownTimer = null;
@@ -2527,6 +2531,8 @@ async function rtAddWatch() {
   const strategy_file = $("rtStrategySelect")?.value;
   const refreshInterval = rtReadRefreshInterval();
   const refresh_seconds = refreshInterval.seconds;
+  const paper_amount = Number($("rtPaperAmountInput")?.value);
+  const paper_mode = $("rtPaperModeSelect")?.value || "T+0";
   const picked = $("rtStrategyPicked");
   if (!symbol) {
     if (picked) { picked.textContent = "请填写品种"; picked.classList.add("bad"); }
@@ -2534,6 +2540,10 @@ async function rtAddWatch() {
   }
   if (!strategy_file) {
     if (picked) { picked.textContent = "请选择或导入策略因子"; picked.classList.add("bad"); }
+    return;
+  }
+  if (!Number.isFinite(paper_amount) || paper_amount <= 0) {
+    if (picked) { picked.textContent = "模拟交易金额必须大于 0"; picked.classList.add("bad"); }
     return;
   }
   if (
@@ -2564,11 +2574,14 @@ async function rtAddWatch() {
         timeframe,
         strategy_file,
         refresh_seconds,
+        paper_amount,
+        paper_mode,
       }),
     });
     if (picked) picked.classList.remove("bad");
     rtEngineRunning = true;
     rtGridSig = "";
+    rtPaperSig = "";
     await refreshRealtime();
   } catch (e) {
     if (picked) { picked.textContent = "添加失败: " + e.message; picked.classList.add("bad"); }
@@ -2676,6 +2689,7 @@ async function rtRemoveWatch(id) {
       body: JSON.stringify({ id }),
     });
     rtGridSig = "";
+    rtPaperSig = "";
     await refreshRealtime();
   } catch (e) {
     await logClientError("移除监控失败: " + e.message);
@@ -2726,6 +2740,7 @@ async function refreshRealtime() {
     }
   }
   renderRealtimeGrid(rtLastWatches);
+  renderPaperTrading(rtLastWatches);
   renderRealtimeData(rtLastWatches);
   maybeShowTvBlockedFromWatches(rtLastWatches);
   ensureRtCountdownTimer();
@@ -2902,6 +2917,248 @@ function renderRealtimeGrid(watches) {
   runCountUp(grid);
 }
 
+function rtSelectedPaperWatch(watches = rtLastWatches) {
+  if (!watches.length) return null;
+  const selected = watches.find((w) => w.id === rtPaperSelectedId);
+  return selected || watches[0];
+}
+
+function rtPaperValueClass(value) {
+  const number = Number(value) || 0;
+  return number > 0 ? "is-profit" : number < 0 ? "is-loss" : "";
+}
+
+function rtRenderPaperChart(watch) {
+  const canvas = $("rtPaperChart");
+  if (!canvas) return;
+  const points = watch?.paper?.equity_curve || [];
+  const last = points[points.length - 1] || {};
+  const sig = `${watch?.id || ""}|${points.length}|${last.ts || ""}|${last.return_pct ?? ""}`;
+  if (sig === rtPaperChartSig) return;
+  rtPaperChartSig = sig;
+  if (rtPaperChart) {
+    rtPaperChart.destroy();
+    rtPaperChart = null;
+  }
+  if (!points.length || typeof Chart === "undefined") return;
+
+  const labels = points.map((point) => rtDateTime(point.ts));
+  const values = points.map((point) => Number(point.return_pct) || 0);
+  rtPaperChart = new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "累计收益率",
+          data: values,
+          borderColor: "#5eead4",
+          backgroundColor: "rgba(94, 234, 212, 0.12)",
+          borderWidth: 2,
+          tension: 0.24,
+          pointRadius: points.length <= 30 ? 2 : 0,
+          pointHoverRadius: 4,
+          fill: true,
+        },
+        {
+          label: "盈亏平衡",
+          data: values.map(() => 0),
+          borderColor: "rgba(148, 163, 184, 0.4)",
+          borderWidth: 1,
+          borderDash: [5, 5],
+          pointRadius: 0,
+          fill: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: {
+          labels: { color: "#9aa9bc", boxWidth: 12, boxHeight: 2 },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.dataset.label}: ${Number(ctx.parsed.y).toFixed(4)}%`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: "rgba(130, 150, 180, 0.08)" },
+          ticks: { color: "#7a8a9e", maxTicksLimit: 6 },
+        },
+        y: {
+          grid: { color: "rgba(130, 150, 180, 0.1)" },
+          ticks: {
+            color: "#7a8a9e",
+            callback: (value) => `${Number(value).toFixed(2)}%`,
+          },
+        },
+      },
+    },
+  });
+}
+
+function renderPaperTrading(watches) {
+  const select = $("rtPaperWatchSelect");
+  const summary = $("rtPaperSummary");
+  const tradesBody = $("rtPaperTradesBody");
+  const hint = $("rtPaperHint");
+  const curveHint = $("rtPaperCurveHint");
+  if (!select || !summary || !tradesBody) return;
+
+  if (!watches.length) {
+    rtPaperSelectedId = "";
+    select.innerHTML = '<option value="">暂无监控账户</option>';
+    select.disabled = true;
+    summary.innerHTML = '<div class="metric-empty">添加监控后，将按信号自动进行独立模拟交易。</div>';
+    tradesBody.innerHTML = '<tr><td colspan="7">暂无成交</td></tr>';
+    if (hint) hint.textContent = "等待监控信号";
+    if (curveHint) curveHint.textContent = "暂无结算点";
+    rtRenderPaperChart(null);
+    rtPaperSig = "";
+    return;
+  }
+
+  select.disabled = false;
+  const watch = rtSelectedPaperWatch(watches);
+  rtPaperSelectedId = watch.id;
+  const optionSig = watches.map((w) => w.id).join("|");
+  if (select.dataset.optionsSig !== optionSig) {
+    select.innerHTML = watches
+      .map(
+        (w) =>
+          `<option value="${escHtml(w.id)}">${escHtml(w.symbol)} · ${escHtml(w.timeframe)} · ${escHtml(w.strategy_name)}</option>`
+      )
+      .join("");
+    select.dataset.optionsSig = optionSig;
+  }
+  select.value = watch.id;
+
+  const paper = watch.paper || {};
+  const trades = paper.trades || [];
+  const curve = paper.equity_curve || [];
+  const lastTrade = trades[trades.length - 1] || {};
+  const lastCurve = curve[curve.length - 1] || {};
+  const sig = [
+    watch.id,
+    paper.amount,
+    paper.mode,
+    paper.cost_rate,
+    paper.total_cost,
+    paper.cash,
+    paper.units,
+    paper.active_position,
+    paper.equity,
+    paper.profit,
+    paper.return_pct,
+    paper.pending_position,
+    trades.length,
+    lastTrade.ts,
+    lastTrade.trade_amount,
+    curve.length,
+    lastCurve.ts,
+    lastCurve.return_pct,
+  ].join("~");
+  if (sig === rtPaperSig) {
+    rtRenderPaperChart(watch);
+    return;
+  }
+  rtPaperSig = sig;
+
+  const amountInput = $("rtPaperEditAmount");
+  const modeSelect = $("rtPaperEditMode");
+  if (amountInput && document.activeElement !== amountInput) amountInput.value = paper.amount ?? 100000;
+  if (modeSelect && document.activeElement !== modeSelect) modeSelect.value = paper.mode || "T+0";
+
+  const positionRatio = (Number(paper.position_ratio) || 0) * 100;
+  const positionText =
+    positionRatio > 0
+      ? `多仓 ${positionRatio.toFixed(1)}%`
+      : positionRatio < 0
+        ? `空仓 ${Math.abs(positionRatio).toFixed(1)}%`
+        : "空仓 0%";
+  const positionClass = positionRatio > 0 ? "is-long" : positionRatio < 0 ? "is-short" : "";
+  const pendingText =
+    paper.pending_position != null
+      ? ` · 待执行 ${(Number(paper.pending_position) * 100).toFixed(1)}%`
+      : "";
+  const costText = `${(Number(paper.cost_rate || 0) * 100).toFixed(3)}%`;
+  summary.innerHTML = `
+    <div class="rt-paper-stat"><span>模拟本金</span><b>${rtFormatCapital(paper.amount)}</b></div>
+    <div class="rt-paper-stat"><span>账户权益</span><b>${rtFormatCapital(paper.equity)}</b></div>
+    <div class="rt-paper-stat ${rtPaperValueClass(paper.profit)}"><span>累计收益</span><b>${Number(paper.profit || 0) >= 0 ? "+" : ""}${rtFormatCapital(paper.profit)} · ${Number(paper.return_pct || 0).toFixed(2)}%</b></div>
+    <div class="rt-paper-stat ${positionClass}"><span>当前持仓</span><b>${escHtml(positionText)}</b></div>
+    <div class="rt-paper-stat"><span>可用资金</span><b>${rtFormatCapital(paper.cash)}</b></div>
+    <div class="rt-paper-stat"><span>执行 / 成交</span><b>${escHtml(paper.mode || "T+0")} · ${Number(paper.trade_count || 0)} 笔 · 成本 ${escHtml(costText)}${escHtml(pendingText)}</b></div>
+  `;
+
+  if (hint) {
+    hint.textContent = `${watch.symbol} · ${watch.timeframe} · 独立账户`;
+  }
+  if (curveHint) {
+    curveHint.textContent = curve.length
+      ? `${curve.length} 个结算点 · 最新 ${rtDateTime(lastCurve.ts)}`
+      : "等待首根有效信号 K 线";
+  }
+
+  tradesBody.innerHTML = trades.length
+    ? [...trades]
+        .reverse()
+        .map((trade) => {
+          const sideClass = trade.side === "BUY" ? "rt-paper-buy" : "rt-paper-sell";
+          const profitClass = Number(trade.profit) > 0 ? "rt-paper-profit" : Number(trade.profit) < 0 ? "rt-paper-loss" : "";
+          return `<tr>
+            <td>${escHtml(rtDateTime(trade.ts))}</td>
+            <td class="${sideClass}">${escHtml(trade.action || trade.side)}</td>
+            <td>${escHtml(rtNumber(trade.price))}</td>
+            <td>${escHtml(rtFormatCapital(trade.trade_amount))}</td>
+            <td>${escHtml(rtFormatCapital(trade.cost))}</td>
+            <td>${(Number(trade.target_position) * 100).toFixed(1)}%</td>
+            <td class="${profitClass}">${Number(trade.profit || 0) >= 0 ? "+" : ""}${escHtml(rtFormatCapital(trade.profit))}</td>
+          </tr>`;
+        })
+        .join("")
+    : '<tr><td colspan="7">暂无成交，等待有效信号。</td></tr>';
+  rtRenderPaperChart(watch);
+}
+
+async function rtConfigurePaper(resetOnly = false) {
+  const watch = rtSelectedPaperWatch();
+  if (!watch) return;
+  const button = resetOnly ? $("rtPaperResetBtn") : $("rtPaperApplyBtn");
+  if (button) button.disabled = true;
+  try {
+    if (resetOnly) {
+      await fetchJSON("/api/realtime/paper/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: watch.id }),
+      });
+    } else {
+      const amount = Number($("rtPaperEditAmount")?.value);
+      const mode = $("rtPaperEditMode")?.value || "T+0";
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error("交易金额必须大于 0");
+      await fetchJSON("/api/realtime/paper", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: watch.id, amount, mode }),
+      });
+    }
+    rtPaperSig = "";
+    rtPaperChartSig = "";
+    await refreshRealtime();
+  } catch (e) {
+    if ($("rtPaperHint")) $("rtPaperHint").textContent = "操作失败: " + e.message;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function renderRealtimeData(watches) {
   const body = $("rtDataBody");
   const hint = $("rtDataHint");
@@ -3056,6 +3313,20 @@ async function init() {
   if ($("rtRefreshUnit")) $("rtRefreshUnit").addEventListener("change", rtSyncRefreshRange);
   if ($("rtBrowseStrategyBtn")) $("rtBrowseStrategyBtn").addEventListener("click", rtBrowseStrategy);
   if ($("rtAddBtn")) $("rtAddBtn").addEventListener("click", rtAddWatch);
+  if ($("rtPaperWatchSelect")) {
+    $("rtPaperWatchSelect").addEventListener("change", (event) => {
+      rtPaperSelectedId = event.target.value;
+      rtPaperSig = "";
+      rtPaperChartSig = "";
+      renderPaperTrading(rtLastWatches);
+    });
+  }
+  if ($("rtPaperApplyBtn")) {
+    $("rtPaperApplyBtn").addEventListener("click", () => rtConfigurePaper(false));
+  }
+  if ($("rtPaperResetBtn")) {
+    $("rtPaperResetBtn").addEventListener("click", () => rtConfigurePaper(true));
+  }
   if ($("tvBlockedMt5Btn")) $("tvBlockedMt5Btn").addEventListener("click", onTvBlockedSwitchMt5);
   if ($("tvBlockedCloudBtn")) $("tvBlockedCloudBtn").addEventListener("click", onTvBlockedOpenCloud);
   document.querySelectorAll("[data-close-tv-blocked]").forEach((el) => {

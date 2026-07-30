@@ -122,3 +122,42 @@ def test_realtime_watch_refresh_seconds_are_persisted_with_default(
     )
     loaded = load_settings()
     assert loaded["realtime_watches"][0]["refresh_seconds"] == 5
+
+
+def test_realtime_watch_paper_state_is_persisted(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = project / "web_settings.json"
+    monkeypatch.setattr(settings_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(settings_mod, "PROJECT_ROOT", project)
+    watch = {
+        "source": "tongdaxin",
+        "symbol": "159170",
+        "timeframe": "5m",
+        "strategy_file": "strategies/best_159170.json",
+        "paper": {
+            "rules_version": 2,
+            "amount": 50_000,
+            "mode": "T+1",
+            "cost_rate": 0.0003,
+            "cash": 49_000,
+            "units": 100,
+            "active_position": 0.2,
+            "signal_queue": [-0.5],
+            "cum_log_return": 0.01,
+            "total_cost": 15,
+            "last_bar_ts": 1_700_000_000,
+            "last_price": 10,
+            "trades": [{"ts": 1_700_000_000, "side": "BUY"}],
+            "equity_curve": [{"ts": 1_700_000_000, "equity": 50_000}],
+        },
+    }
+
+    saved = save_settings({"realtime_watches": [watch]})
+    restored = saved["realtime_watches"][0]["paper"]
+
+    assert restored["amount"] == 50_000
+    assert restored["mode"] == "T+1"
+    assert restored["signal_queue"] == [-0.5]
+    assert restored["cost_rate"] == 0.0003
+    assert restored["trades"][0]["side"] == "BUY"
