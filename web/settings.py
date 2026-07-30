@@ -11,6 +11,7 @@ STRATEGIES_DIR = PROJECT_ROOT / "strategies"
 _DEFAULT = {
     "last_data_file": "",
     "recent_data_files": [],
+    "training_records": [],
     "last_strategy_file": "",
     "debug_mode": False,
     "ai_provider": "deepseek",
@@ -101,6 +102,69 @@ def _clean_recent_data_files(values) -> list[str]:
     return cleaned
 
 
+def _clean_training_records(values) -> list[dict]:
+    """Normalize per-data-file training configuration and strategy records."""
+    if not isinstance(values, (list, tuple)):
+        return []
+
+    records: list[dict] = []
+    seen: set[str] = set()
+    config_keys = {
+        "train_steps",
+        "batch_size",
+        "reward_mode",
+        "max_formula_len",
+        "device",
+        "mode",
+        "from_scratch",
+    }
+    strategy_keys = {
+        "strategy_file",
+        "best_score",
+        "vocab_version",
+        "formula_decoded",
+        "mode",
+    }
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        raw_path = str(value.get("data_file") or "").strip()
+        if not raw_path or Path(raw_path).suffix.lower() != ".parquet":
+            continue
+        path = Path(raw_path)
+        data_file = str(path.resolve()) if path.is_file() else raw_path
+        key = data_file.replace("\\", "/").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        config = value.get("training_config")
+        if not isinstance(config, dict):
+            config = {}
+        strategy = value.get("strategy")
+        if not isinstance(strategy, dict):
+            strategy = {}
+        records.append(
+            {
+                "data_file": data_file,
+                "symbol": str(value.get("symbol") or "").strip(),
+                "timeframe": str(value.get("timeframe") or "").strip(),
+                "training_config": {
+                    key: config[key]
+                    for key in config_keys
+                    if key in config
+                },
+                "strategy": {
+                    key: strategy[key]
+                    for key in strategy_keys
+                    if key in strategy and strategy[key] is not None
+                },
+                "updated_at": str(value.get("updated_at") or "").strip(),
+            }
+        )
+    return records
+
+
 def _should_replace_last_data_file(path: str) -> bool:
     cur = str(path or "").strip()
     if not cur:
@@ -164,6 +228,7 @@ def load_settings() -> dict:
     )
     original_recent = out.get("recent_data_files")
     out["recent_data_files"] = _clean_recent_data_files(original_recent)
+    out["training_records"] = _clean_training_records(out.get("training_records"))
     watches = out.get("realtime_watches")
     if not isinstance(watches, list):
         watches = []
@@ -223,6 +288,10 @@ def save_settings(data: dict) -> dict:
                 current["recent_data_files"] = _clean_recent_data_files(
                     [path, *current.get("recent_data_files", [])]
                 )
+    if "recent_data_files" in data:
+        current["recent_data_files"] = _clean_recent_data_files(data["recent_data_files"])
+    if "training_records" in data:
+        current["training_records"] = _clean_training_records(data["training_records"])
     if "last_strategy_file" in data:
         current["last_strategy_file"] = str(data["last_strategy_file"] or "").strip()
     if "debug_mode" in data:

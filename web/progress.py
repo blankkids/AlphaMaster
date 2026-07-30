@@ -266,6 +266,7 @@ def list_strategies() -> list[dict[str, Any]]:
         formula = data.get("formula")
         rows.append({
             "file": path.name,
+            "strategy_file": str(path.resolve()),
             "symbol": data.get("symbol") or path.stem.replace("best_", "", 1),
             "timeframe": data.get("timeframe"),
             "best_score": data.get("best_score"),
