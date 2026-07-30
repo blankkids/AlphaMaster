@@ -8,6 +8,11 @@ from typing import Any
 
 from data_pipeline.parquet_manager import inspect_parquet_file
 from model_core.vocab import VOCAB_VERSION
+from utils.training_identity import (
+    normalize_timeframe,
+    safe_artifact_tag,
+    strategy_filename,
+)
 from web.progress import (
     STRATEGIES_DIR,
     _decode_formula,
@@ -24,8 +29,11 @@ _STRATEGY_EXPORT_RE = re.compile(
 )
 
 
-def strategy_path_for_symbol(symbol: str) -> Path:
-    return STRATEGIES_DIR / f"best_{symbol}.json"
+def strategy_path_for_symbol(
+    symbol: str,
+    timeframe: str | None = None,
+) -> Path:
+    return STRATEGIES_DIR / strategy_filename(symbol, timeframe)
 
 
 def symbol_from_strategy_path(path: Path) -> str | None:
@@ -44,15 +52,23 @@ def _resolve_data_file_for_symbol(
     data_file: str | None,
     *,
     data_file_hint: str | None = None,
+    timeframe: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Fill missing strategy data_file from training settings / job hint."""
     sym = (symbol or "").strip()
+    expected_timeframe = normalize_timeframe(timeframe)
     if data_file:
         p = Path(str(data_file))
         if p.exists():
             try:
                 info = inspect_parquet_file(str(p.resolve()))
-                if not sym or info.get("symbol") == sym:
+                if (
+                    (not sym or info.get("symbol") == sym)
+                    and (
+                        not expected_timeframe
+                        or info.get("timeframe") == expected_timeframe
+                    )
+                ):
                     return str(p.resolve()), info.get("timeframe")
             except Exception:
                 return str(p.resolve()), None
@@ -70,6 +86,8 @@ def _resolve_data_file_for_symbol(
             continue
         if sym and info.get("symbol") != sym:
             continue
+        if expected_timeframe and info.get("timeframe") != expected_timeframe:
+            continue
         return str(p.resolve()), info.get("timeframe")
     return data_file, None
 
@@ -84,6 +102,7 @@ def _apply_data_file_fallback(
         symbol,
         payload.get("data_file"),
         data_file_hint=data_file_hint,
+        timeframe=payload.get("timeframe"),
     )
     if data_file:
         payload["data_file"] = data_file
@@ -138,6 +157,7 @@ def inspect_strategy_file(
         symbol or "",
         data_file,
         data_file_hint=data_file_hint,
+        timeframe=timeframe,
     )
     if tf_fallback and not timeframe:
         timeframe = tf_fallback
@@ -163,15 +183,31 @@ def inspect_strategy_file(
 def resolve_strategy_file(
     saved_path: str,
     train_symbol: str | None = None,
+    train_timeframe: str | None = None,
 ) -> str:
-    """优先使用已保存路径；否则回退到训练品种对应的 best_{symbol}.json。"""
+    """Resolve the strategy for the currently selected symbol and timeframe."""
     if saved_path:
         p = Path(saved_path)
         if p.exists():
-            return str(p.resolve())
+            if not train_symbol and not train_timeframe:
+                return str(p.resolve())
+            try:
+                saved = inspect_strategy_file(str(p.resolve()))
+            except Exception:
+                saved = {}
+            symbol_matches = (
+                not train_symbol or saved.get("symbol") == train_symbol
+            )
+            timeframe_matches = (
+                not train_timeframe
+                or normalize_timeframe(saved.get("timeframe"))
+                == normalize_timeframe(train_timeframe)
+            )
+            if symbol_matches and timeframe_matches:
+                return str(p.resolve())
 
     if train_symbol:
-        default = strategy_path_for_symbol(train_symbol)
+        default = strategy_path_for_symbol(train_symbol, train_timeframe)
         if default.exists():
             return str(default.resolve())
 
@@ -192,16 +228,30 @@ def sync_best_strategy_for_symbol(
     symbol: str,
     *,
     data_file_hint: str | None = None,
+    timeframe: str | None = None,
 ) -> dict[str, Any] | None:
-    """在策略文件与检查点中选出最高分策略，写入 strategies/best_{symbol}.json。"""
+    """在同品种、同周期产物中选出最高分策略。"""
+    timeframe = normalize_timeframe(timeframe)
+    if not timeframe and data_file_hint:
+        try:
+            hinted = inspect_parquet_file(data_file_hint)
+        except Exception:
+            hinted = {}
+        if hinted.get("symbol") == symbol:
+            timeframe = normalize_timeframe(hinted.get("timeframe"))
     candidates: list[tuple[float, list[int], int]] = []
 
-    strat = _load_strategy(symbol)
+    strat = _load_strategy(symbol, timeframe)
     if strat and strat.get("formula") and strat.get("best_score") is not None:
         step = int(strat.get("train_step") or strat.get("current_step") or 0)
         candidates.append((float(strat["best_score"]), strat["formula"], step))
 
-    for ckpt_path in checkpoint_glob(symbol):
+    ckpt_paths = (
+        checkpoint_glob(symbol, timeframe)
+        if timeframe
+        else checkpoint_glob(symbol)
+    )
+    for ckpt_path in ckpt_paths:
         meta = _load_checkpoint_meta(ckpt_path)
         score = meta.get("best_score")
         formula = meta.get("best_formula")
@@ -209,7 +259,7 @@ def sync_best_strategy_for_symbol(
             continue
         candidates.append((float(score), formula, int(meta.get("step") or 0)))
 
-    safe = symbol.replace(".", "_")
+    safe = safe_artifact_tag(symbol, timeframe)
     for path in STRATEGIES_DIR.glob(f"strategy_{safe}_*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -222,17 +272,18 @@ def sync_best_strategy_for_symbol(
         candidates.append((float(score), formula, _step_from_export_name(path)))
 
     if not candidates:
-        existing = strategy_path_for_symbol(symbol)
+        existing = strategy_path_for_symbol(symbol, timeframe)
         if existing.exists():
             return inspect_strategy_file(str(existing.resolve()))
         return None
 
     best_score, best_formula, best_step = max(candidates, key=lambda row: row[0])
-    out_path = strategy_path_for_symbol(symbol)
+    out_path = strategy_path_for_symbol(symbol, timeframe)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "vocab_version": VOCAB_VERSION,
         "symbol": symbol,
+        "timeframe": timeframe,
         "formula": best_formula,
         "best_score": best_score,
         "formula_decoded": _decode_formula(best_formula),

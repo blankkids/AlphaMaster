@@ -80,7 +80,7 @@ def build_training_snapshot(symbol: str | None = None) -> dict[str, Any]:
     if not timeframe:
         timeframe = "H1"
 
-    progress = get_symbol_progress(sym)
+    progress = get_symbol_progress(sym, timeframe)
     history = progress.history or {}
     curve = _training_curve(history, max_points=500)
 

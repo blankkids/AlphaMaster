@@ -12,6 +12,12 @@ from typing import Any
 import torch
 
 from model_core.vocab import FORMULA_VOCAB
+from utils.training_identity import (
+    history_filename,
+    normalize_timeframe,
+    safe_artifact_tag,
+    strategy_filename,
+)
 from web.progress import (
     CHECKPOINT_DIR,
     PROJECT_ROOT,
@@ -24,8 +30,11 @@ from web.progress import (
 _CKPT_NAME_RE = re.compile(r"^ckpt_(.+)_step_(\d+)\.pt$", re.IGNORECASE)
 
 
-def _history_path(symbol: str) -> Path:
-    return PROJECT_ROOT / f"training_history_{symbol}.json"
+def _history_path(
+    symbol: str,
+    timeframe: str | None = None,
+) -> Path:
+    return PROJECT_ROOT / history_filename(symbol, timeframe)
 
 
 def _symbol_from_ckpt_name(name: str) -> str | None:
@@ -44,27 +53,37 @@ def _validate_checkpoint_file(path: Path) -> dict[str, Any]:
     FORMULA_VOCAB.verify(artifact_version)
     step = int(ckpt.get("step", 0))
     symbol = ckpt.get("symbol")
-    return {"step": step, "symbol": symbol, "best_score": ckpt.get("best_score")}
+    return {
+        "step": step,
+        "symbol": symbol,
+        "timeframe": normalize_timeframe(ckpt.get("timeframe")),
+        "best_score": ckpt.get("best_score"),
+    }
 
 
-def build_training_export_zip(symbol: str) -> tuple[bytes, str]:
-    ckpts = checkpoint_glob(symbol)
+def build_training_export_zip(
+    symbol: str,
+    timeframe: str | None = None,
+) -> tuple[bytes, str]:
+    timeframe = normalize_timeframe(timeframe)
+    ckpts = checkpoint_glob(symbol, timeframe)
     if not ckpts:
         raise FileNotFoundError(f"未找到 {symbol} 的训练检查点，请先训练并保存 checkpoint")
 
     latest = ckpts[-1]
     _validate_checkpoint_file(latest)
 
-    strategy = _load_strategy(symbol)
-    history_path = _history_path(symbol)
+    strategy = _load_strategy(symbol, timeframe)
+    history_path = _history_path(symbol, timeframe)
 
     step = int(re.search(r"_step_(\d+)\.pt$", latest.name).group(1))
-    safe = symbol.replace(".", "_")
+    safe = safe_artifact_tag(symbol, timeframe)
     zip_name = f"training_{safe}_step{step:04d}.zip"
 
     manifest = {
-        "format": "alphamaster_training_v1",
+        "format": "alphamaster_training_v2",
         "symbol": symbol,
+        "timeframe": timeframe,
         "step": step,
         "checkpoint": f"checkpoints/{latest.name}",
         "exported_at": datetime.now(timezone.utc).isoformat(),
@@ -76,7 +95,7 @@ def build_training_export_zip(symbol: str) -> tuple[bytes, str]:
         zf.write(latest, f"checkpoints/{latest.name}")
 
         if strategy:
-            strat_name = f"strategies/best_{symbol}.json"
+            strat_name = f"strategies/{strategy_filename(symbol, timeframe)}"
             payload = dict(strategy)
             if payload.get("formula") and not payload.get("formula_decoded"):
                 payload["formula_decoded"] = _decode_formula(payload["formula"])
@@ -84,7 +103,7 @@ def build_training_export_zip(symbol: str) -> tuple[bytes, str]:
             manifest["files"].append(strat_name)
 
         if history_path.exists():
-            hist_name = f"training_history_{symbol}.json"
+            hist_name = history_filename(symbol, timeframe)
             zf.write(history_path, hist_name)
             manifest["files"].append(hist_name)
 
@@ -93,9 +112,12 @@ def build_training_export_zip(symbol: str) -> tuple[bytes, str]:
     return buf.getvalue(), zip_name
 
 
-def _remove_symbol_checkpoints(symbol: str) -> int:
+def _remove_symbol_checkpoints(
+    symbol: str,
+    timeframe: str | None = None,
+) -> int:
     removed = 0
-    for path in checkpoint_glob(symbol):
+    for path in checkpoint_glob(symbol, timeframe):
         path.unlink(missing_ok=True)
         removed += 1
     return removed
@@ -105,20 +127,29 @@ def import_training_package(
     content: bytes,
     filename: str,
     expected_symbol: str | None = None,
+    expected_timeframe: str | None = None,
 ) -> dict[str, Any]:
     name = Path(filename).name.lower()
     installed: list[str] = []
     symbol: str | None = None
+    timeframe: str | None = None
     step: int | None = None
 
     if name.endswith(".zip"):
-        result = _import_zip(content, expected_symbol)
+        result = _import_zip(content, expected_symbol, expected_timeframe)
         symbol = result["symbol"]
+        timeframe = result.get("timeframe")
         step = result["step"]
         installed = result["installed"]
     elif name.endswith(".pt"):
-        result = _import_pt(content, filename, expected_symbol)
+        result = _import_pt(
+            content,
+            filename,
+            expected_symbol,
+            expected_timeframe,
+        )
         symbol = result["symbol"]
+        timeframe = result.get("timeframe")
         step = result["step"]
         installed = result["installed"]
     else:
@@ -128,23 +159,32 @@ def import_training_package(
     return {
         "ok": True,
         "symbol": symbol,
+        "timeframe": timeframe,
         "step": step,
         "installed": installed,
         "message": f"已导入 {symbol} 的训练文件（step {step}），下次训练将从断点续训",
     }
 
 
-def _import_zip(content: bytes, expected_symbol: str | None) -> dict[str, Any]:
+def _import_zip(
+    content: bytes,
+    expected_symbol: str | None,
+    expected_timeframe: str | None,
+) -> dict[str, Any]:
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         names = [n for n in zf.namelist() if not n.endswith("/")]
         if "manifest.json" not in names:
             raise ValueError("训练包缺少 manifest.json")
 
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-        if manifest.get("format") != "alphamaster_training_v1":
+        if manifest.get("format") not in {
+            "alphamaster_training_v1",
+            "alphamaster_training_v2",
+        }:
             raise ValueError("不支持的训练包格式")
 
         symbol = manifest.get("symbol") or ""
+        timeframe = normalize_timeframe(manifest.get("timeframe"))
         ckpt_rel = manifest.get("checkpoint", "")
         if not symbol or not ckpt_rel:
             raise ValueError("训练包 manifest 不完整")
@@ -153,8 +193,16 @@ def _import_zip(content: bytes, expected_symbol: str | None) -> dict[str, Any]:
             raise ValueError(
                 f"训练包品种为 {symbol}，与当前选择的 {expected_symbol} 不一致"
             )
+        if (
+            expected_timeframe
+            and timeframe != normalize_timeframe(expected_timeframe)
+        ):
+            raise ValueError(
+                f"训练包周期为 {timeframe or '未知'}，"
+                f"与当前选择的 {expected_timeframe} 不一致"
+            )
 
-        _remove_symbol_checkpoints(symbol)
+        _remove_symbol_checkpoints(symbol, timeframe)
         installed: list[str] = []
         imported_history = False
 
@@ -168,30 +216,57 @@ def _import_zip(content: bytes, expected_symbol: str | None) -> dict[str, Any]:
 
             if member.endswith(".pt"):
                 _validate_checkpoint_file(dest)
-            if member == f"training_history_{symbol}.json":
+            if member == history_filename(symbol, timeframe):
                 imported_history = True
 
         # 若 zip 不包含训练曲线，项目中可能残留更“新”的 history，导致 UI 显示步数不变。
         # 这类 zip 通常只有 checkpoint + strategy（例如只想迁移断点），因此应清掉旧曲线以与 checkpoint 对齐。
         if not imported_history:
             try:
-                _history_path(symbol).unlink(missing_ok=True)
+                _history_path(symbol, timeframe).unlink(missing_ok=True)
             except OSError:
                 pass
 
         step = int(manifest.get("step") or 0)
-        return {"symbol": symbol, "step": step, "installed": installed}
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "step": step,
+            "installed": installed,
+        }
 
 
-def _import_pt(content: bytes, filename: str, expected_symbol: str | None) -> dict[str, Any]:
+def _import_pt(
+    content: bytes,
+    filename: str,
+    expected_symbol: str | None,
+    expected_timeframe: str | None,
+) -> dict[str, Any]:
     ckpt_name = Path(filename).name
-    symbol = _symbol_from_ckpt_name(ckpt_name)
+    try:
+        raw_meta = torch.load(
+            io.BytesIO(content),
+            map_location="cpu",
+            weights_only=False,
+        )
+    except Exception as exc:
+        raise ValueError(f"无法读取检查点: {exc}") from exc
+    symbol = raw_meta.get("symbol") or _symbol_from_ckpt_name(ckpt_name)
+    timeframe = normalize_timeframe(raw_meta.get("timeframe"))
     if not symbol:
         raise ValueError(f"无法从文件名识别品种: {ckpt_name}（须为 ckpt_品种_step_XXXX.pt）")
 
     if expected_symbol and symbol != expected_symbol:
         raise ValueError(
             f"检查点品种为 {symbol}，与当前选择的 {expected_symbol} 不一致"
+        )
+    if (
+        expected_timeframe
+        and timeframe != normalize_timeframe(expected_timeframe)
+    ):
+        raise ValueError(
+            f"检查点周期为 {timeframe or '未知'}，"
+            f"与当前选择的 {expected_timeframe} 不一致"
         )
 
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -201,16 +276,17 @@ def _import_pt(content: bytes, filename: str, expected_symbol: str | None) -> di
     # Web 进度会优先使用该曲线文件的最后一步，导致显示步数大于 checkpoint。
     # 因此这里主动清掉旧曲线，避免「导入 60 步却显示 84」。
     try:
-        _history_path(symbol).unlink(missing_ok=True)
+        _history_path(symbol, timeframe).unlink(missing_ok=True)
     except OSError:
         pass
 
-    _remove_symbol_checkpoints(symbol)
+    _remove_symbol_checkpoints(symbol, timeframe)
     dest.write_bytes(content)
     meta = _validate_checkpoint_file(dest)
 
     return {
         "symbol": symbol,
+        "timeframe": timeframe,
         "step": meta["step"],
         "installed": [str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")],
     }

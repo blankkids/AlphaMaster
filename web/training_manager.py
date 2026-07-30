@@ -15,6 +15,7 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils.train_logging import strip_ansi
+from utils.training_identity import history_filename, safe_artifact_tag
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = PROJECT_ROOT / "logs"
@@ -147,10 +148,10 @@ class TrainingManager:
                 raise RuntimeError(f"已有训练任务在运行: {sym}")
 
             ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            safe_sym = symbol.replace(".", "_")
-            log_path = LOG_DIR / f"train_{safe_sym}_{ts}.log"
+            safe_identity = safe_artifact_tag(symbol, timeframe)
+            log_path = LOG_DIR / f"train_{safe_identity}_{ts}.log"
 
-            hist_path = PROJECT_ROOT / f"training_history_{symbol}.json"
+            hist_path = PROJECT_ROOT / history_filename(symbol, timeframe)
             try:
                 hist_path.unlink(missing_ok=True)
             except OSError:
@@ -320,6 +321,7 @@ class TrainingManager:
 
         record_training_session(
             symbol=job.symbol,
+            timeframe=job.timeframe,
             started_at=job.started_at,
             finished_at=job.finished_at,
             log_path=rel,

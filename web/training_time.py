@@ -9,6 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from utils.training_identity import (
+    artifact_tag,
+    safe_artifact_tag,
+    training_time_filename,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = PROJECT_ROOT / "logs"
 
@@ -16,9 +22,8 @@ _lock = threading.Lock()
 _backfilled: set[str] = set()
 
 
-def _stats_path(symbol: str) -> Path:
-    safe = symbol.replace(".", "_")
-    return PROJECT_ROOT / f"training_time_{safe}.json"
+def _stats_path(symbol: str, timeframe: str | None = None) -> Path:
+    return PROJECT_ROOT / training_time_filename(symbol, timeframe)
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -42,22 +47,27 @@ def _duration_seconds(started_at: str, finished_at: str | None) -> int:
     return max(0, int((end - start).total_seconds()))
 
 
-def _load(symbol: str) -> dict[str, Any]:
-    path = _stats_path(symbol)
+def _load(symbol: str, timeframe: str | None = None) -> dict[str, Any]:
+    path = _stats_path(symbol, timeframe)
     if not path.exists():
-        return {"symbol": symbol, "sessions": []}
+        return {"symbol": symbol, "timeframe": timeframe, "sessions": []}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {"symbol": symbol, "sessions": []}
+        return {"symbol": symbol, "timeframe": timeframe, "sessions": []}
     if not isinstance(data.get("sessions"), list):
         data["sessions"] = []
     data["symbol"] = symbol
+    data["timeframe"] = timeframe
     return data
 
 
-def _save(symbol: str, data: dict[str, Any]) -> None:
-    path = _stats_path(symbol)
+def _save(
+    symbol: str,
+    timeframe: str | None,
+    data: dict[str, Any],
+) -> None:
+    path = _stats_path(symbol, timeframe)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -71,13 +81,18 @@ def _known_log_paths(data: dict[str, Any]) -> set[str]:
     return out
 
 
-def _backfill_from_logs(symbol: str, data: dict[str, Any]) -> dict[str, Any]:
+def _backfill_from_logs(
+    symbol: str,
+    timeframe: str | None,
+    data: dict[str, Any],
+) -> dict[str, Any]:
     """One-time import of past train logs (mtime - ctime) for this symbol."""
-    if symbol in _backfilled:
+    identity = artifact_tag(symbol, timeframe)
+    if identity in _backfilled:
         return data
-    _backfilled.add(symbol)
+    _backfilled.add(identity)
 
-    safe = symbol.replace(".", "_")
+    safe = safe_artifact_tag(symbol, timeframe)
     pattern = re.compile(rf"^train_{re.escape(safe)}_(\d{{8}})_(\d{{6}})\.log$")
     known = _known_log_paths(data)
     sessions: list[dict[str, Any]] = list(data.get("sessions") or [])
@@ -120,13 +135,14 @@ def _backfill_from_logs(symbol: str, data: dict[str, Any]) -> dict[str, Any]:
 
     data["sessions"] = sessions
     if sessions:
-        _save(symbol, data)
+        _save(symbol, timeframe, data)
     return data
 
 
 def record_training_session(
     *,
     symbol: str,
+    timeframe: str | None = None,
     started_at: str,
     finished_at: str | None,
     log_path: str,
@@ -140,7 +156,11 @@ def record_training_session(
         return
 
     with _lock:
-        data = _backfill_from_logs(symbol, _load(symbol))
+        data = _backfill_from_logs(
+            symbol,
+            timeframe,
+            _load(symbol, timeframe),
+        )
         if rel_log in _known_log_paths(data):
             return
         sessions = list(data.get("sessions") or [])
@@ -154,7 +174,7 @@ def record_training_session(
             }
         )
         data["sessions"] = sessions
-        _save(symbol, data)
+        _save(symbol, timeframe, data)
 
 
 @dataclass
@@ -165,6 +185,7 @@ class TrainingTimeSummary:
 
 def get_training_time_summary(
     symbol: str,
+    timeframe: str | None = None,
     *,
     job: dict[str, Any] | None = None,
     active: bool = False,
@@ -174,7 +195,11 @@ def get_training_time_summary(
         return TrainingTimeSummary(session_seconds=None, history_total_seconds=0)
 
     with _lock:
-        data = _backfill_from_logs(symbol, _load(symbol))
+        data = _backfill_from_logs(
+            symbol,
+            timeframe,
+            _load(symbol, timeframe),
+        )
         past_seconds = sum(
             int(row.get("seconds") or 0)
             for row in (data.get("sessions") or [])
@@ -182,7 +207,15 @@ def get_training_time_summary(
         )
 
     session_seconds: int | None = None
-    if job and str(job.get("symbol") or "") == symbol:
+    if (
+        job
+        and str(job.get("symbol") or "") == symbol
+        and (
+            timeframe is None
+            or str(job.get("timeframe") or "").upper()
+            == str(timeframe).upper()
+        )
+    ):
         session_seconds = _duration_seconds(
             str(job.get("started_at") or ""),
             None if active else job.get("finished_at"),

@@ -402,6 +402,334 @@ class MT5Backtest:
         return -penalty
 
     # ──────────────────────────────────────────────────────────────────────
+    # 单品种批量评分（CUDA 路径）
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _sortino_batch(self, pnl: Tensor, eps: float = 1e-8) -> Tensor:
+        """按行计算 Sortino；``pnl`` 形状为 ``[B, T]``。"""
+        mean_pnl = pnl.mean(dim=1)
+        negative = pnl < 0
+        count = negative.sum(dim=1)
+        safe_count = count.clamp(min=1).to(pnl.dtype)
+        negative_values = torch.where(negative, pnl, torch.zeros_like(pnl))
+        negative_mean = negative_values.sum(dim=1) / safe_count
+        negative_sq_mean = (negative_values * negative_values).sum(dim=1) / safe_count
+        negative_var = (negative_sq_mean - negative_mean * negative_mean).clamp(min=0)
+        raw_std = torch.where(
+            count > 0,
+            negative_var.sqrt(),
+            torch.zeros_like(mean_pnl),
+        )
+        full_std = pnl.std(dim=1, unbiased=False).clamp(min=eps)
+        floor = torch.clamp(full_std * 0.2, min=eps)
+        downside_std = torch.maximum(raw_std, floor)
+        sortino = mean_pnl / downside_std * math.sqrt(self.periods_per_year)
+        return torch.clamp(sortino, -_SORTINO_CLIP, _SORTINO_CLIP)
+
+    def _calmar_batch(self, pnl: Tensor, eps: float = 1e-8) -> Tensor:
+        """按行计算 Calmar；``pnl`` 形状为 ``[B, T]``。"""
+        ann_ret = pnl.mean(dim=1) * self.periods_per_year
+        cumulative = torch.cumsum(pnl, dim=1)
+        peak = torch.cummax(cumulative, dim=1).values
+        drawdown = (peak - cumulative).amax(dim=1).clamp(min=eps)
+        return torch.clamp(ann_ret / drawdown, -10.0, 10.0)
+
+    @staticmethod
+    def _single_symbol_ic_batch(factors: Tensor, target_ret: Tensor) -> Tensor:
+        """单品种时序 IC；``factors=[B,T]``、``target_ret=[T]``。"""
+        if factors.shape[1] < 2:
+            return torch.zeros(
+                factors.shape[0],
+                dtype=factors.dtype,
+                device=factors.device,
+            )
+        x = factors[:, :-1]
+        y = target_ret[1:].reshape(1, -1)
+        x_centered = x - x.mean(dim=1, keepdim=True)
+        y_centered = y - y.mean(dim=1, keepdim=True)
+        sx = (x_centered * x_centered).mean(dim=1).sqrt()
+        sy = (y_centered * y_centered).mean(dim=1).sqrt().expand_as(sx)
+        covariance = (x_centered * y_centered).mean(dim=1)
+        valid = (sx >= 1e-6) & (sy >= 1e-6)
+        ic = covariance / (sx * sy + 1e-8)
+        return torch.where(valid, ic, torch.zeros_like(ic))
+
+    def _ts_ic_stability_batch(self, factors: Tensor, target_ret: Tensor) -> Tensor:
+        """复刻单品种 ``_ts_ic_stability`` 的批量语义。"""
+        if factors.shape[1] < 10:
+            return torch.zeros(
+                factors.shape[0],
+                dtype=factors.dtype,
+                device=factors.device,
+            )
+        ic = self._single_symbol_ic_batch(factors, target_ret)
+        # 单品种的 IC 标准差为 0；原实现以 1e-6 为分母并截断到 [-3,3]。
+        return torch.clamp(ic / 1e-6, -3.0, 3.0)
+
+    @staticmethod
+    def _turnover_quality_batch(position: Tensor) -> Tensor:
+        """复刻 ``_turnover_quality`` 的单品种批量版本。"""
+        batch, length = position.shape
+        discrete = torch.trunc(position).to(torch.int8)
+        active = discrete != 0
+        starts = active[:, :1]
+        if length > 1:
+            starts = torch.cat(
+                [
+                    starts,
+                    active[:, 1:] & (discrete[:, 1:] != discrete[:, :-1]),
+                ],
+                dim=1,
+            )
+        trades = starts.sum(dim=1).to(position.dtype)
+        target_trades = max(length / 12.0, 1.0)
+        ratio = trades / target_trades
+
+        freq_score = torch.full_like(ratio, -2.0)
+        freq_score = torch.where(
+            (ratio > 0) & (ratio < 0.05),
+            -2.0 + ratio / 0.05,
+            freq_score,
+        )
+        freq_score = torch.where(
+            (ratio >= 0.05) & (ratio < 0.5),
+            -1.0 + (ratio - 0.05) / 0.45,
+            freq_score,
+        )
+        middle = torch.exp(
+            -0.5 * (torch.log(ratio.clamp(min=1e-12)) / math.log(2.0)) ** 2
+        )
+        freq_score = torch.where(
+            (ratio >= 0.5) & (ratio <= 2.0),
+            middle,
+            freq_score,
+        )
+        freq_score = torch.where(
+            (ratio > 2.0) & (ratio <= 8.0),
+            0.5 - (ratio - 2.0) / 6.0 * 1.5,
+            freq_score,
+        )
+
+        active_bars = active.sum(dim=1).to(position.dtype)
+        avg_hold = active_bars / trades.clamp(min=1.0)
+        hold_bonus = torch.clamp(
+            torch.log(avg_hold.clamp(min=1.0)) / math.log(30.0) * 0.3,
+            max=0.3,
+        )
+        hold_bonus = torch.where(trades > 0, hold_bonus, torch.zeros_like(hold_bonus))
+        return freq_score + hold_bonus
+
+    @staticmethod
+    def _exposure_penalty_batch(position: Tensor) -> Tensor:
+        exposure = position.abs().mean(dim=1)
+        return torch.where(
+            exposure < 0.10,
+            (exposure / 0.10 - 1.0) * 2.0,
+            torch.zeros_like(exposure),
+        )
+
+    @staticmethod
+    def _beta_neutral_penalty_batch(position: Tensor) -> Tensor:
+        long_ratio = (position > 0.05).to(position.dtype).mean(dim=1)
+        short_ratio = (position < -0.05).to(position.dtype).mean(dim=1)
+        max_ratio = torch.maximum(long_ratio, short_ratio)
+        heavy = -2.0 * (max_ratio - 0.85) / 0.15
+        light = -0.5 * (max_ratio - 0.70) / 0.15
+        return torch.where(
+            max_ratio > 0.85,
+            heavy,
+            torch.where(
+                max_ratio > 0.70,
+                light,
+                torch.zeros_like(max_ratio),
+            ),
+        )
+
+    def _half_consistency_bonus_batch(self, pnl: Tensor) -> Tensor:
+        length = pnl.shape[1]
+        if length < 20:
+            return torch.zeros(
+                pnl.shape[0],
+                dtype=pnl.dtype,
+                device=pnl.device,
+            )
+        half = length // 2
+        first = self._sortino_batch(pnl[:, :half])
+        second = self._sortino_batch(pnl[:, half:])
+        return torch.where(
+            (first > 0) & (second > 0),
+            torch.full_like(first, 0.5),
+            torch.where(
+                first * second < 0,
+                torch.full_like(first, -1.0),
+                torch.zeros_like(first),
+            ),
+        )
+
+    @staticmethod
+    def _reversal_bonus_batch(factors: Tensor) -> Tensor:
+        x = factors[:, :-1]
+        y = factors[:, 1:]
+        x_centered = x - x.mean(dim=1, keepdim=True)
+        y_centered = y - y.mean(dim=1, keepdim=True)
+        sx = (x_centered * x_centered).mean(dim=1).sqrt()
+        sy = (y_centered * y_centered).mean(dim=1).sqrt()
+        ac1 = (x_centered * y_centered).mean(dim=1) / (sx * sy + 1e-8)
+        ac1 = torch.where(
+            (sx > 1e-6) & (sy > 1e-6),
+            ac1,
+            torch.zeros_like(ac1),
+        )
+        bonus = 1.0 - ac1.abs() + torch.where(
+            ac1 < 0,
+            torch.full_like(ac1, 0.5),
+            torch.zeros_like(ac1),
+        )
+        return torch.clamp(bonus, -1.0, 2.0)
+
+    @staticmethod
+    def _symmetry_check_batch(position: Tensor) -> Tensor:
+        long_ratio = (position > 0).to(position.dtype).mean(dim=1)
+        short_ratio = (position < 0).to(position.dtype).mean(dim=1)
+        deviation = (long_ratio - 0.5).abs() + (short_ratio - 0.5).abs()
+        return torch.clamp(1.0 - 2.0 * deviation, -1.0, 1.0)
+
+    def _multi_objective_batch_single(
+        self,
+        factors: Tensor,
+        target_ret: Tensor,
+        pnl: Tensor,
+        position: Tensor,
+    ) -> Tensor:
+        """单品种 ``_multi_objective`` 的批量等价实现。"""
+        ann_ret = pnl.mean(dim=1) * self.periods_per_year
+        sortino = self._sortino_batch(pnl)
+        calmar = self._calmar_batch(pnl)
+        ts_ic = self._ts_ic_stability_batch(factors, target_ret)
+        turnover_quality = self._turnover_quality_batch(position)
+        exposure_penalty = self._exposure_penalty_batch(position)
+        beta_penalty = self._beta_neutral_penalty_batch(position)
+        consistency = self._half_consistency_bonus_batch(pnl)
+
+        if ModelConfig.REWARD_MODE == "forex":
+            reversal = self._reversal_bonus_batch(factors)
+            symmetry = self._symmetry_check_batch(position)
+            return (
+                0.25 * ann_ret
+                + 0.05 * sortino
+                + 0.05 * calmar
+                + 0.25 * ts_ic
+                + 0.20 * reversal
+                + 0.15 * symmetry
+                + 0.05 * turnover_quality
+                + exposure_penalty
+                + beta_penalty
+                + consistency
+            )
+
+        if ModelConfig.REWARD_MODE == "ftmo":
+            return (
+                0.80 * ann_ret
+                + 0.05 * sortino
+                + 0.10 * calmar
+                + 0.03 * ts_ic
+                + 0.02 * turnover_quality
+                + exposure_penalty
+                + beta_penalty
+                + consistency
+            )
+
+        return (
+            0.60 * ann_ret
+            + 0.15 * sortino
+            + 0.10 * calmar
+            + 0.10 * ts_ic
+            + 0.05 * turnover_quality
+            + exposure_penalty
+            + beta_penalty
+            + consistency
+        )
+
+    def evaluate_fold_batch(
+        self,
+        factors: Tensor,
+        target_ret: Tensor,
+        train_start: int,
+        train_end: int,
+        val_start: int,
+        val_end: int,
+    ) -> tuple[Tensor, Tensor]:
+        """批量计算一个 walk-forward 折。
+
+        ``factors`` 为 ``[B,N,T]``。当前单品种路径完全张量化；多品种保持逐条
+        回退，以便在不改变组合评分语义的前提下先加速 ``train_file.py``。
+        """
+        if factors.ndim != 3:
+            raise ValueError(f"factors 应为 [B,N,T]，实际 {tuple(factors.shape)}")
+
+        if factors.shape[1] != 1:
+            pairs = [
+                self.evaluate_fold(
+                    factors[i],
+                    target_ret,
+                    train_start,
+                    train_end,
+                    val_start,
+                    val_end,
+                )
+                for i in range(factors.shape[0])
+            ]
+            return (
+                torch.stack([pair[0] for pair in pairs]),
+                torch.stack([pair[1] for pair in pairs]),
+            )
+
+        position = compute_target_positions_stateless(factors)
+        previous = torch.roll(position, 1, dims=2)
+        previous[:, :, 0] = 0.0
+        turnover = (position - previous).abs()
+        pnl = position * target_ret.unsqueeze(0) - turnover * self.cost_rate
+
+        factor_train = factors[:, 0, train_start:train_end]
+        target_train = target_ret[0, train_start:train_end]
+        pnl_train = pnl[:, 0, train_start:train_end]
+        position_train = position[:, 0, train_start:train_end]
+        turnover_train = turnover[:, 0, train_start:train_end]
+
+        train_score = self._multi_objective_batch_single(
+            factor_train,
+            target_train,
+            pnl_train,
+            position_train,
+        )
+        mean_turnover = turnover_train.mean(dim=1)
+        train_score = train_score - torch.clamp(
+            (mean_turnover - 0.2) * 3.0,
+            min=0.0,
+            max=3.0,
+        )
+
+        factor_val = factors[:, 0, val_start:val_end]
+        target_val = target_ret[0, val_start:val_end]
+        pnl_val = pnl[:, 0, val_start:val_end]
+        position_val = position[:, 0, val_start:val_end]
+        base_val = self._multi_objective_batch_single(
+            factor_val,
+            target_val,
+            pnl_val,
+            position_val,
+        )
+        oos_sortino = self._sortino_batch(pnl_val)
+        negative_mult = torch.clamp(0.5 + oos_sortino * 0.4, min=0.1)
+        positive_mult = torch.clamp(1.0 + oos_sortino * 0.1, max=1.2)
+        multiplier = torch.where(
+            oos_sortino <= 0,
+            negative_mult,
+            positive_mult,
+        )
+        return train_score, base_val * multiplier
+
+    # ──────────────────────────────────────────────────────────────────────
     # Walk-Forward 辅助接口
     # ──────────────────────────────────────────────────────────────────────
 

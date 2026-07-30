@@ -374,15 +374,19 @@ def _strategy_context() -> dict[str, Any]:
     settings = load_settings()
     data_file = settings.get("last_data_file") or ""
     train_symbol = None
+    train_timeframe = None
     if data_file:
         try:
-            train_symbol = inspect_parquet_file(data_file).get("symbol")
+            data_info = inspect_parquet_file(data_file)
+            train_symbol = data_info.get("symbol")
+            train_timeframe = data_info.get("timeframe")
         except Exception:
             pass
 
     resolved = resolve_strategy_file(
         settings.get("last_strategy_file") or "",
         train_symbol,
+        train_timeframe,
     )
     strategy_info = None
     if resolved:
@@ -401,6 +405,7 @@ def _strategy_context() -> dict[str, Any]:
         "last_strategy_file": resolved,
         "strategy_file": strategy_info,
         "train_symbol": train_symbol,
+        "train_timeframe": train_timeframe,
     }
 
 
@@ -506,16 +511,28 @@ def _sync_and_persist_best_strategy(
     symbol: str,
     *,
     data_file_hint: str | None = None,
+    timeframe: str | None = None,
 ) -> dict[str, Any] | None:
     invalidate_checkpoint_cache()
     hint = data_file_hint
     if not hint:
         job = training_manager.status().get("job") or {}
-        if str(job.get("symbol") or "") == symbol:
+        if (
+            str(job.get("symbol") or "") == symbol
+            and (
+                not timeframe
+                or str(job.get("timeframe") or "").upper()
+                == str(timeframe).upper()
+            )
+        ):
             hint = job.get("data_file") or None
     if not hint:
         hint = load_settings().get("last_data_file") or None
-    info = sync_best_strategy_for_symbol(symbol, data_file_hint=hint)
+    info = sync_best_strategy_for_symbol(
+        symbol,
+        data_file_hint=hint,
+        timeframe=timeframe,
+    )
     if info:
         save_settings({"last_strategy_file": info["strategy_file"]})
     return info
@@ -732,18 +749,32 @@ def api_upload_strategy_file(file: UploadFile = File(...)) -> dict[str, Any]:
 
 @app.post("/api/strategy-file/sync-best")
 @app.get("/api/strategy-file/sync-best")
-def api_sync_best_strategy(symbol: str | None = None) -> dict[str, Any]:
+def api_sync_best_strategy(
+    symbol: str | None = None,
+    timeframe: str | None = None,
+) -> dict[str, Any]:
     sym = _resolve_train_symbol(symbol)
     if not sym:
         raise HTTPException(400, "请先选择训练数据文件或指定品种")
-    info = _sync_and_persist_best_strategy(sym)
+    if not timeframe:
+        settings_file = load_settings().get("last_data_file") or ""
+        if settings_file:
+            try:
+                timeframe = inspect_parquet_file(settings_file).get("timeframe")
+            except Exception:
+                timeframe = None
+    info = _sync_and_persist_best_strategy(sym, timeframe=timeframe)
     if not info:
         raise HTTPException(404, f"未找到 {sym} 的可用策略")
     return {"ok": True, **info}
 
 
-def _progress_with_live_step(symbol: str, active: bool) -> dict[str, Any]:
-    p = get_symbol_progress(symbol)
+def _progress_with_live_step(
+    symbol: str,
+    timeframe: str | None,
+    active: bool,
+) -> dict[str, Any]:
+    p = get_symbol_progress(symbol, timeframe)
     current_step = p.current_step
     if active:
         live = training_manager.parse_step_from_log()
@@ -761,6 +792,7 @@ def _progress_with_live_step(symbol: str, active: bool) -> dict[str, Any]:
             val_score = None
     return {
         "symbol": p.symbol,
+        "timeframe": p.timeframe,
         "current_step": current_step,
         "train_steps": train_steps,
         "progress_pct": round(progress_pct, 1),
@@ -778,12 +810,18 @@ def _attach_training_time(
     row: dict[str, Any] | None,
     *,
     symbol: str | None,
+    timeframe: str | None,
     job: dict[str, Any] | None,
     active: bool,
 ) -> dict[str, Any] | None:
     if not row or not symbol:
         return row
-    summary = get_training_time_summary(symbol, job=job, active=active)
+    summary = get_training_time_summary(
+        symbol,
+        timeframe,
+        job=job,
+        active=active,
+    )
     row = dict(row)
     row["session_seconds"] = summary.session_seconds
     row["history_total_seconds"] = summary.history_total_seconds
@@ -805,9 +843,11 @@ def api_overview() -> dict[str, Any]:
         try:
             file_info = inspect_parquet_file(data_file)
             sym = file_info.get("symbol")
-            row = _progress_with_live_step(sym, active=False)
+            timeframe = file_info.get("timeframe")
+            row = _progress_with_live_step(sym, timeframe, active=False)
             progress = {
                 "symbol": row["symbol"],
+                "timeframe": row["timeframe"],
                 "status": row["status"],
                 "current_step": row["current_step"],
                 "train_steps": row["train_steps"],
@@ -819,16 +859,27 @@ def api_overview() -> dict[str, Any]:
                 "has_strategy": row.get("has_strategy", False),
             }
             progress = _attach_training_time(
-                progress, symbol=sym, job=job, active=active and job and job.get("symbol") == sym
+                progress,
+                symbol=sym,
+                timeframe=timeframe,
+                job=job,
+                active=bool(
+                    active
+                    and job
+                    and job.get("symbol") == sym
+                    and job.get("timeframe") == timeframe
+                ),
             )
         except Exception as e:
             file_info = {"data_file": data_file, "valid": False, "message": str(e)}
 
     if job and job.get("symbol") and active:
         sym = job["symbol"]
-        row = _progress_with_live_step(sym, active=True)
+        timeframe = job.get("timeframe")
+        row = _progress_with_live_step(sym, timeframe, active=True)
         progress = {
             "symbol": row["symbol"],
+            "timeframe": row["timeframe"],
             "status": "running_job",
             "current_step": row["current_step"],
             "train_steps": row["train_steps"],
@@ -839,7 +890,13 @@ def api_overview() -> dict[str, Any]:
             "has_checkpoint": row.get("has_checkpoint", False),
             "has_strategy": row.get("has_strategy", False),
         }
-        progress = _attach_training_time(progress, symbol=sym, job=job, active=True)
+        progress = _attach_training_time(
+            progress,
+            symbol=sym,
+            timeframe=timeframe,
+            job=job,
+            active=True,
+        )
 
     return {
         "data_file": file_info,
@@ -849,10 +906,14 @@ def api_overview() -> dict[str, Any]:
 
 
 @app.get("/api/symbols/{symbol}")
-def api_symbol(symbol: str) -> dict[str, Any]:
-    p = get_symbol_progress(symbol)
+def api_symbol(
+    symbol: str,
+    timeframe: str | None = None,
+) -> dict[str, Any]:
+    p = get_symbol_progress(symbol, timeframe)
     return {
         "symbol": p.symbol,
+        "timeframe": p.timeframe,
         "status": p.status,
         "current_step": p.current_step,
         "train_steps": p.train_steps,
@@ -873,22 +934,30 @@ def api_strategies() -> dict[str, Any]:
 
 
 @app.get("/api/strategies/{symbol}/export")
-def api_export_strategy(symbol: str):
+def api_export_strategy(
+    symbol: str,
+    timeframe: str | None = None,
+):
     import json
 
     from fastapi.responses import Response
 
     try:
-        payload = get_strategy_for_export(symbol)
+        payload = get_strategy_for_export(symbol, timeframe)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    progress = get_symbol_progress(symbol)
+    progress = get_symbol_progress(symbol, timeframe)
     step = progress.current_step
     score = payload.get("best_score")
     if score is None:
         score = progress.strategy_score if progress.strategy_score is not None else progress.best_score
-    filename = build_strategy_export_filename(symbol, step, score)
+    filename = build_strategy_export_filename(
+        symbol,
+        step,
+        score,
+        timeframe,
+    )
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     return Response(
         content=body,
@@ -900,11 +969,14 @@ def api_export_strategy(symbol: str):
 
 
 @app.get("/api/training/{symbol}/export")
-def api_export_training(symbol: str):
+def api_export_training(
+    symbol: str,
+    timeframe: str | None = None,
+):
     from fastapi.responses import Response
 
     try:
-        body, zip_name = build_training_export_zip(symbol)
+        body, zip_name = build_training_export_zip(symbol, timeframe)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -921,6 +993,7 @@ def api_export_training(symbol: str):
 async def api_import_training(
     file: UploadFile = File(...),
     symbol: str | None = Query(None, description="当前选择的品种，用于校验导入包是否一致"),
+    timeframe: str | None = Query(None, description="当前选择的周期，用于校验导入包是否一致"),
 ) -> dict[str, Any]:
     if training_manager.status().get("active"):
         raise HTTPException(409, "训练进行中，请先停止再导入")
@@ -934,6 +1007,7 @@ async def api_import_training(
             raw,
             file.filename or "upload.zip",
             expected_symbol=symbol or None,
+            expected_timeframe=timeframe or None,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -974,6 +1048,7 @@ def api_training_start(req: StartTrainingRequest) -> dict[str, Any]:
 def api_training_stop() -> dict[str, Any]:
     job = training_manager.status().get("job") or {}
     symbol = job.get("symbol")
+    timeframe = job.get("timeframe")
     data_file_hint = job.get("data_file")
     stopped = training_manager.stop()
     strategy_file = None
@@ -982,6 +1057,7 @@ def api_training_stop() -> dict[str, Any]:
         strategy_file = _sync_and_persist_best_strategy(
             symbol,
             data_file_hint=data_file_hint,
+            timeframe=timeframe,
         )
     return {
         "ok": stopped,
@@ -1275,7 +1351,7 @@ def api_realtime_strategies() -> dict[str, Any]:
         sym = s.get("symbol")
         if not sym:
             continue
-        path = strategy_path_for_symbol(sym)
+        path = strategy_path_for_symbol(sym, s.get("timeframe"))
         if not path.exists():
             continue
         rows.append(
