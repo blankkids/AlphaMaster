@@ -99,6 +99,53 @@ def test_recent_data_files_have_no_count_limit(
     assert saved == [str(path.resolve()) for path in reversed(files)]
 
 
+def test_training_records_are_persisted_per_data_file(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = project / "web_settings.json"
+    monkeypatch.setattr(settings_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(settings_mod, "PROJECT_ROOT", project)
+    monkeypatch.setattr(settings_mod, "_is_production_settings_path", lambda: False)
+    data_file = project / "TEST_M5.parquet"
+    data_file.write_bytes(b"PAR1")
+
+    saved = save_settings({
+        "training_records": [{
+            "data_file": str(data_file),
+            "symbol": "TEST",
+            "timeframe": "M5",
+            "training_config": {
+                "train_steps": 100,
+                "batch_size": 64,
+                "mode": "ftmo",
+                "ignored": "value",
+            },
+            "strategy": {
+                "strategy_file": "strategies/best_TEST_M5.json",
+                "best_score": 1.25,
+                "ignored": "value",
+            },
+            "updated_at": "2026-07-30T10:00:00+00:00",
+        }]
+    })
+
+    assert saved["training_records"] == [{
+        "data_file": str(data_file.resolve()),
+        "symbol": "TEST",
+        "timeframe": "M5",
+        "training_config": {
+            "train_steps": 100,
+            "batch_size": 64,
+            "mode": "ftmo",
+        },
+        "strategy": {
+            "strategy_file": "strategies/best_TEST_M5.json",
+            "best_score": 1.25,
+        },
+        "updated_at": "2026-07-30T10:00:00+00:00",
+    }]
+
+
 def test_realtime_watch_refresh_seconds_are_persisted_with_default(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

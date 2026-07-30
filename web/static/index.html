@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=30" />
+  <link rel="stylesheet" href="/static/style.css?v=32" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -83,7 +83,10 @@
                 <option value="">暂无历史数据</option>
               </select>
             </label>
-            <button type="button" class="btn btn-secondary btn-browse" id="browseBtn">选择新数据</button>
+            <div class="data-source-actions">
+              <button type="button" class="btn btn-secondary btn-browse" id="browseBtn">选择新数据</button>
+              <button type="button" class="btn btn-danger" id="deleteHistoryDataBtn" disabled>删除历史数据</button>
+            </div>
           </div>
           <input type="file" id="dataFileInput" accept=".parquet" hidden />
           <div class="data-file-card" id="dataFileCard">
@@ -272,6 +275,12 @@
           <div class="launch-row launch-row-main">
             <button type="button" class="btn btn-secondary btn-browse" id="btBrowseStrategyBtn">选择策略</button>
             <input type="file" id="strategyFileInput" accept=".json,application/json" hidden />
+            <label class="bt-strategy-switch">
+              <span>切换已保存策略</span>
+              <select id="btStrategySelect">
+                <option value="">暂无已保存策略</option>
+              </select>
+            </label>
             <div class="data-file-card" id="btStrategyCard">
               <div class="data-file-empty">尚未选择策略文件</div>
             </div>
@@ -301,7 +310,13 @@
         <span class="hud-corner bl"></span><span class="hud-corner br"></span>
         <div class="panel-head">
           <h2>回测绩效</h2>
-          <span class="hint" id="btPortfolioHint">尚未运行回测</span>
+          <div class="bt-run-switch">
+            <label for="btRunSelect">查看回测</label>
+            <select id="btRunSelect">
+              <option value="">暂无历史回测</option>
+            </select>
+            <span class="hint" id="btPortfolioHint">尚未运行回测</span>
+          </div>
         </div>
         <div class="metric-grid" id="btPortfolioGrid">
           <div class="metric-empty">运行回测后显示收益、夏普、盈亏比等指标</div>
@@ -752,6 +767,6 @@
   </div>
 
   <script src="/static/bg.js?v=1"></script>
-  <script src="/static/app.js?v=65"></script>
+  <script src="/static/app.js?v=68"></script>
 </body>
 </html>

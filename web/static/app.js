@@ -2,9 +2,12 @@ const API = "";
 let selectedDataFile = null;
 let selectedSymbol = null;
 let selectedTimeframe = null;
+let historicalDataFiles = [];
 let selectedStrategyFile = null;
 let strategyUploadTarget = "backtest";
 let selectedStrategySymbol = null;
+let selectedBacktestRunId = null;
+let backtestRuns = [];
 let chart = null;
 let chartSymbol = null;
 let pollTimer = null;
@@ -17,6 +20,7 @@ let lastDebugViewContent = "";
 let currentPage = "train";
 let btActive = false;
 let btBuster = "";      // 图表缓存刷新键（用 job 时间戳）
+let btRunsSig = "";
 let btPortfolioSig = ""; // 绩效卡签名：变化时才重建 + 播放数字动画，避免每次轮询重播
 let lastEquityData = null; // 最近一次资金曲线数据，供绩效卡 sparkline 复用
 let lastTrainingActive = false;
@@ -302,6 +306,16 @@ function updateHistoryDataSelect(active = false) {
   const select = $("historyDataSelect");
   if (!select) return;
   select.disabled = active || select.options.length <= 1;
+  const deleteBtn = $("deleteHistoryDataBtn");
+  if (deleteBtn) {
+    const row = historicalDataFiles.find(
+      (item) => normalizeFilePath(item.data_file) === normalizeFilePath(select.value)
+    );
+    deleteBtn.disabled = active || !row;
+    deleteBtn.title = row
+      ? "永久删除历史记录及对应的源 Parquet 文件"
+      : "请先选择一条历史数据";
+  }
 }
 
 async function refreshDataFileHistory(preferredPath = selectedDataFile) {
@@ -312,6 +326,7 @@ async function refreshDataFileHistory(preferredPath = selectedDataFile) {
   try {
     const response = await fetchJSON("/api/data-files/history", { silent: true });
     const rows = response.data_files || [];
+    historicalDataFiles = rows;
     select.replaceChildren();
 
     const placeholder = document.createElement("option");
@@ -332,6 +347,7 @@ async function refreshDataFileHistory(preferredPath = selectedDataFile) {
     }
     updateHistoryDataSelect(false);
   } catch (_) {
+    historicalDataFiles = [];
     select.replaceChildren(new Option("历史数据加载失败", ""));
     select.disabled = true;
   }
@@ -342,7 +358,7 @@ async function selectHistoricalDataFile(event) {
   const dataFile = select.value;
   if (!dataFile) return;
 
-  select.disabled = true;
+  updateHistoryDataSelect(true);
   try {
     const res = await fetchJSON("/api/data-file/select", {
       method: "POST",
@@ -366,6 +382,8 @@ function updateBtStartBtn() {
   const startBtn = $("btStartBtn");
   if (!startBtn) return;
   startBtn.disabled = btActive || !selectedStrategyFile;
+  const strategySelect = $("btStrategySelect");
+  if (strategySelect) strategySelect.disabled = btActive || strategySelect.options.length <= 1;
   ["btCommissionInput", "btSlippageInput"].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = btActive;
@@ -399,6 +417,14 @@ function renderStrategyFileCard(info) {
 
   selectedStrategyFile = info.strategy_file;
   selectedStrategySymbol = info.symbol || null;
+  const strategySelect = $("btStrategySelect");
+  if (strategySelect) {
+    const selectedKey = normalizeFilePath(info.strategy_file);
+    const matching = Array.from(strategySelect.options).find(
+      (option) => normalizeFilePath(option.value) === selectedKey
+    );
+    strategySelect.value = matching?.value || "";
+  }
   card.className = "data-file-card valid";
   const timeframeItem = info.timeframe
     ? `<div class="item"><span class="label">周期</span><span class="value">${info.timeframe}</span></div>`
@@ -420,6 +446,100 @@ function renderStrategyFileCard(info) {
     <div class="path ${dataPath && dataOk ? "" : "data-file-missing"}" title="${dataPath || ""}">数据: ${dataHint}</div>
   `;
   updateBtStartBtn();
+}
+
+function normalizeFilePath(value) {
+  return String(value || "").replaceAll("\\", "/").toLowerCase();
+}
+
+function renderBacktestStrategyOptions(rows) {
+  const select = $("btStrategySelect");
+  if (!select) return;
+  const selectedKey = normalizeFilePath(selectedStrategyFile);
+  const signature = (rows || [])
+    .map((row) => [row.strategy_file, row.symbol, row.timeframe, row.best_score].join("|"))
+    .join(";");
+  if (select.dataset.signature === signature) return;
+  select.dataset.signature = signature;
+  select.replaceChildren();
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = rows?.length ? "选择已保存策略…" : "暂无已保存策略";
+  select.appendChild(placeholder);
+
+  for (const row of rows || []) {
+    const option = document.createElement("option");
+    option.value = row.strategy_file || "";
+    const score = row.best_score == null ? "—" : formatScore(row.best_score);
+    option.textContent = `${row.symbol || "—"} · ${row.timeframe || "—"} · 分数 ${score}`;
+    option.title = row.strategy_file || row.file || "";
+    if (normalizeFilePath(option.value) === selectedKey) option.selected = true;
+    select.appendChild(option);
+  }
+  select.disabled = !rows?.length || btActive;
+}
+
+async function selectSavedBacktestStrategy(event) {
+  const select = event.target;
+  const strategyFile = select.value;
+  if (!strategyFile) return;
+  select.disabled = true;
+  try {
+    const info = await fetchJSON("/api/strategy-file/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy_file: strategyFile }),
+    });
+    renderStrategyFileCard(info);
+    const matchedRun = backtestRuns.find(
+      (run) => run.available && normalizeFilePath(run.strategy_file) === normalizeFilePath(strategyFile)
+    );
+    if (matchedRun) {
+      selectedBacktestRunId = matchedRun.run_id;
+      if ($("btRunSelect")) $("btRunSelect").value = matchedRun.run_id;
+      btBuster = matchedRun.run_id;
+      btPortfolioSig = "";
+      await refreshBacktestReport();
+    }
+  } catch (_) {
+    select.value = Array.from(select.options).find(
+      (option) => normalizeFilePath(option.value) === normalizeFilePath(selectedStrategyFile)
+    )?.value || "";
+  } finally {
+    select.disabled = btActive || select.options.length <= 1;
+  }
+}
+
+async function deleteHistoricalData() {
+  const select = $("historyDataSelect");
+  const row = historicalDataFiles.find(
+    (item) => normalizeFilePath(item.data_file) === normalizeFilePath(select?.value)
+  );
+  if (!row) return;
+
+  const warning =
+    `将永久删除以下历史数据及源 Parquet 文件：\n\n${row.data_file}\n\n删除后无法恢复，是否继续？`;
+  if (!window.confirm(warning)) return;
+
+  updateHistoryDataSelect(true);
+  try {
+    const response = await fetchJSON("/api/data-file/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data_file: row.data_file }),
+    });
+    if (normalizeFilePath(selectedDataFile) === normalizeFilePath(row.data_file)) {
+      renderDataFileCard(null);
+    }
+    await refreshDataFileHistory(response.current_data_file || null);
+    await refreshOverview();
+    window.alert(response.message || "历史数据已删除");
+  } catch (error) {
+    showErrorPopup("删除历史数据失败", error.message);
+  } finally {
+    updateHistoryDataSelect(false);
+  }
 }
 
 function formatElapsed(startedAtIso, endAtIso) {
@@ -747,6 +867,7 @@ async function refreshOverview() {
   updateTrainingBtns(overview.progress, training);
   updateTrainingUI(training, overview.progress);
   renderStrategies(strategies.strategies);
+  renderBacktestStrategyOptions(strategies.strategies);
 
   const sym = overview.progress?.symbol || selectedSymbol || training?.job?.symbol;
   const timeframe =
@@ -1337,6 +1458,80 @@ function fmtSigned(v, digits = 3) {
   return (v >= 0 ? "+" : "") + Number(v).toFixed(digits);
 }
 
+function formatBacktestRunLabel(run) {
+  const started = run.started_at ? new Date(run.started_at) : null;
+  const when = started && !Number.isNaN(started.getTime())
+    ? started.toLocaleString("zh-CN", { hour12: false })
+    : "时间未知";
+  const state = BT_STATE_LABEL[run.state] || run.state || "未知";
+  return `${run.symbol || "—"} · ${run.timeframe || "—"} · ${run.strategy_name || "策略"} · ${when} · ${state}`;
+}
+
+async function refreshBacktestRuns(preferredRunId = selectedBacktestRunId) {
+  const select = $("btRunSelect");
+  if (!select) return;
+  let rows;
+  try {
+    const response = await fetchJSON("/api/backtest/runs", { silent: true });
+    rows = response.runs || [];
+  } catch (_) {
+    return;
+  }
+  backtestRuns = rows;
+  const nextRunId = rows.some(
+    (row) => row.run_id === preferredRunId && (row.available || row.state === "running")
+  )
+    ? preferredRunId
+    : (rows.find((row) => row.available)?.run_id || rows[0]?.run_id || null);
+  const signature = rows
+    .map((row) => [row.run_id, row.state, row.available, row.finished_at].join("|"))
+    .join(";");
+  if (signature !== btRunsSig) {
+    btRunsSig = signature;
+    select.replaceChildren();
+    if (!rows.length) {
+      select.appendChild(new Option("暂无历史回测", ""));
+    } else {
+      for (const row of rows) {
+        const option = document.createElement("option");
+        option.value = row.run_id;
+        option.textContent = formatBacktestRunLabel(row);
+        option.title = row.output_dir || row.run_id;
+        option.disabled = !row.available && row.state !== "running";
+        select.appendChild(option);
+      }
+    }
+  }
+  const changed = selectedBacktestRunId !== nextRunId;
+  selectedBacktestRunId = nextRunId;
+  select.value = nextRunId || "";
+  select.disabled = !rows.length;
+  if (changed) {
+    btBuster = nextRunId || "";
+    btPortfolioSig = "";
+  }
+}
+
+async function selectBacktestRun(event) {
+  selectedBacktestRunId = event.target.value || null;
+  btBuster = selectedBacktestRunId || "";
+  btPortfolioSig = "";
+  lastEquityData = null;
+  await refreshBacktestReport();
+}
+
+function backtestResultUrl(path) {
+  const params = new URLSearchParams();
+  if (selectedBacktestRunId) {
+    params.set("run_id", selectedBacktestRunId);
+  } else {
+    const sym = selectedStrategySymbol || selectedSymbol;
+    if (sym) params.set("symbol", sym);
+  }
+  const query = params.toString();
+  return query ? `${path}?${query}` : path;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // 回测：状态轮询 + UI 更新
 // ═══════════════════════════════════════════════════════════════════
@@ -1350,6 +1545,7 @@ async function refreshBacktest() {
   btActive = !!st.active;
   const job = st.job;
   const state = job?.state || "idle";
+  await refreshBacktestRuns(selectedBacktestRunId || job?.run_id || null);
 
   // 按钮
   const stopBtn = $("btStopBtn");
@@ -1429,10 +1625,7 @@ function updateBacktestPhase(st, state) {
 
 async function refreshBacktestReport() {
   let data;
-  const sym = selectedStrategySymbol || selectedSymbol;
-  const url = sym
-    ? `/api/backtest/report?symbol=${encodeURIComponent(sym)}`
-    : "/api/backtest/report";
+  const url = backtestResultUrl("/api/backtest/report");
   try {
     data = await fetchJSON(url, { silent: true });
   } catch (_) {
@@ -1454,10 +1647,7 @@ async function refreshBacktestReport() {
 }
 
 async function refreshEquityCurve() {
-  const sym = selectedStrategySymbol || selectedSymbol;
-  const url = sym
-    ? `/api/backtest/equity?symbol=${encodeURIComponent(sym)}`
-    : "/api/backtest/equity";
+  const url = backtestResultUrl("/api/backtest/equity");
   try {
     const data = await fetchJSON(url, { silent: true });
     lastEquityData = data?.available ? data.data : null;
@@ -2037,6 +2227,8 @@ async function startBacktest() {
       }),
     });
     if (res.strategy_file) renderStrategyFileCard(res.strategy_file);
+    selectedBacktestRunId = res.job?.run_id || selectedBacktestRunId;
+    await refreshBacktestRuns(selectedBacktestRunId);
     await refreshBacktest();
   } catch (e) {
     if ($("btLogHint")) $("btLogHint").textContent = e.message;
@@ -3264,6 +3456,7 @@ async function init() {
   $("browseBtn").addEventListener("click", browseDataFile);
   $("dataFileInput").addEventListener("change", handleDataFileUpload);
   $("historyDataSelect")?.addEventListener("change", selectHistoricalDataFile);
+  $("deleteHistoryDataBtn")?.addEventListener("click", deleteHistoricalData);
   $("startBtn").addEventListener("click", startTraining);
   if ($("retrainBtn")) $("retrainBtn").addEventListener("click", retrainFromScratch);
   $("stopBtn").addEventListener("click", stopTraining);
@@ -3297,6 +3490,8 @@ async function init() {
   // 回测控制
   if ($("btBrowseStrategyBtn")) $("btBrowseStrategyBtn").addEventListener("click", browseStrategyFile);
   if ($("strategyFileInput")) $("strategyFileInput").addEventListener("change", handleStrategyFileUpload);
+  if ($("btStrategySelect")) $("btStrategySelect").addEventListener("change", selectSavedBacktestStrategy);
+  if ($("btRunSelect")) $("btRunSelect").addEventListener("change", selectBacktestRun);
   if ($("btStartBtn")) $("btStartBtn").addEventListener("click", startBacktest);
   if ($("btStopBtn")) $("btStopBtn").addEventListener("click", stopBacktest);
   ["btCommissionInput", "btSlippageInput"].forEach((id) => {
