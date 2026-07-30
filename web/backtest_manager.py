@@ -5,11 +5,13 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -24,6 +26,8 @@ from utils.train_logging import strip_ansi
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = PROJECT_ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
+BACKTEST_RUNS_DIR = PROJECT_ROOT / "backtest_output" / "runs"
+RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 
 # 回测阶段：用日志关键字推断当前进行到哪一步，用于前端进度展示
 BACKTEST_PHASES: list[tuple[str, str]] = [
@@ -48,8 +52,12 @@ class JobState(str, Enum):
 
 @dataclass
 class BacktestJob:
+    run_id: str
     strategy_file: str
     symbol: str
+    output_dir: str
+    data_file: str
+    timeframe: str | None = None
     commission_pct: float = 0.02
     slippage_pct: float = 0.01
     state: JobState = JobState.RUNNING
@@ -62,8 +70,13 @@ class BacktestJob:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "run_id": self.run_id,
             "strategy_file": self.strategy_file,
+            "strategy_name": Path(self.strategy_file).name,
             "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "data_file": self.data_file,
+            "output_dir": self.output_dir,
             "commission_pct": self.commission_pct,
             "slippage_pct": self.slippage_pct,
             "state": self.state.value,
@@ -74,6 +87,43 @@ class BacktestJob:
             "exit_code": self.exit_code,
             "error": self.error,
         }
+
+
+def resolve_backtest_run_dir(run_id: str) -> Path:
+    """Resolve a persisted run directory without allowing path traversal."""
+    value = str(run_id or "").strip()
+    if not RUN_ID_RE.fullmatch(value):
+        raise ValueError("非法回测批次 ID")
+    path = (BACKTEST_RUNS_DIR / value).resolve()
+    try:
+        path.relative_to(BACKTEST_RUNS_DIR.resolve())
+    except ValueError:
+        raise ValueError("非法回测批次路径") from None
+    return path
+
+
+def list_persisted_backtest_runs(limit: int = 100) -> list[dict[str, Any]]:
+    """Load newest persisted backtest run metadata from disk."""
+    if not BACKTEST_RUNS_DIR.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for metadata_path in BACKTEST_RUNS_DIR.glob("*/run.json"):
+        try:
+            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        run_id = str(data.get("run_id") or metadata_path.parent.name)
+        try:
+            output_dir = resolve_backtest_run_dir(run_id)
+        except ValueError:
+            continue
+        data["run_id"] = run_id
+        data["available"] = (output_dir / "multi_factor_report.json").exists()
+        rows.append(data)
+    rows.sort(key=lambda row: str(row.get("started_at") or ""), reverse=True)
+    return rows[: max(1, int(limit))]
 
 
 class BacktestManager:
@@ -98,6 +148,11 @@ class BacktestManager:
             "phase_total": len(BACKTEST_PHASES),
         }
 
+    def list_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            self._refresh_state()
+        return list_persisted_backtest_runs(limit)
+
     def start(
         self,
         strategy_file: str,
@@ -114,9 +169,18 @@ class BacktestManager:
 
             info = inspect_strategy_file(strategy_file)
             symbol = info.get("symbol") or ""
+            timeframe = info.get("timeframe")
 
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            log_path = LOG_DIR / f"backtest_{ts}.log"
+            if not data_file:
+                raise RuntimeError(
+                    "回测必须使用本地 Parquet（策略未记录 data_file，且未传入数据文件）"
+                )
+
+            now = datetime.now(timezone.utc)
+            run_id = f"{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+            output_dir = BACKTEST_RUNS_DIR / run_id
+            output_dir.mkdir(parents=True, exist_ok=False)
+            log_path = LOG_DIR / f"backtest_{run_id}.log"
 
             cmd = [
                 sys.executable,
@@ -128,11 +192,9 @@ class BacktestManager:
                 str(commission_pct),
                 "--slippage",
                 str(slippage_pct),
+                "--output-dir",
+                str(output_dir),
             ]
-            if not data_file:
-                raise RuntimeError(
-                    "回测必须使用本地 Parquet（策略未记录 data_file，且未传入数据文件）"
-                )
             cmd.extend(["--data-file", data_file])
 
             self._log_fp = open(log_path, "w", encoding="utf-8", buffering=1)
@@ -147,23 +209,33 @@ class BacktestManager:
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
             self._stopped_by_user = False
-            self._proc = subprocess.Popen(
-                cmd,
-                cwd=PROJECT_ROOT,
-                stdout=self._log_fp,
-                stderr=subprocess.STDOUT,
-                env=env,
-                creationflags=creationflags,
-            )
+            try:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    cwd=PROJECT_ROOT,
+                    stdout=self._log_fp,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    creationflags=creationflags,
+                )
+            except Exception:
+                self._log_fp.close()
+                self._log_fp = None
+                raise
             self._job = BacktestJob(
+                run_id=run_id,
                 strategy_file=strategy_file,
                 symbol=symbol,
+                timeframe=str(timeframe) if timeframe else None,
+                data_file=data_file,
+                output_dir=str(output_dir.relative_to(PROJECT_ROOT)).replace("\\", "/"),
                 commission_pct=float(commission_pct),
                 slippage_pct=float(slippage_pct),
                 pid=self._proc.pid,
                 log_path=str(log_path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
-                started_at=datetime.now(timezone.utc).isoformat(),
+                started_at=now.isoformat(),
             )
+            self._persist_job()
             return self._job
 
     def stop(self) -> bool:
@@ -250,7 +322,28 @@ class BacktestManager:
             except Exception:
                 pass
             self._log_fp = None
+        self._persist_job()
         self._proc = None
+
+    def _persist_job(self) -> None:
+        if self._job is None or not self._job.output_dir:
+            return
+        output_dir = (PROJECT_ROOT / self._job.output_dir).resolve()
+        try:
+            output_dir.relative_to(BACKTEST_RUNS_DIR.resolve())
+        except ValueError:
+            return
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            metadata_path = output_dir / "run.json"
+            tmp_path = output_dir / "run.json.tmp"
+            tmp_path.write_text(
+                json.dumps(self._job.to_dict(), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            tmp_path.replace(metadata_path)
+        except OSError:
+            pass
 
 
 backtest_manager = BacktestManager()

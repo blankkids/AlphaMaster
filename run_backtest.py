@@ -463,7 +463,7 @@ def export_equity_json(
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 
 def main():
-    OUTPUT_DIR  = "backtest_output"
+    output_dir = "backtest_output"
     single_mode = "--single" in sys.argv
     # 回测强制离线：只用本地 Parquet，永不连 MT5 在线
     if "--online" in sys.argv or "--mt5" in sys.argv:
@@ -483,6 +483,8 @@ def main():
             commission_pct = float(sys.argv[i + 1])
         elif arg == "--slippage" and i + 1 < len(sys.argv):
             slippage_pct = float(sys.argv[i + 1])
+        elif arg == "--output-dir" and i + 1 < len(sys.argv):
+            output_dir = sys.argv[i + 1]
 
     if commission_pct < 0 or slippage_pct < 0:
         print("[ERROR] 手续费/滑点不能为负"); sys.exit(1)
@@ -697,11 +699,11 @@ def main():
     print(f"{'='*62}\n")
 
     # ── 6. 资金曲线图 ─────────────────────────────────────────────────
-    Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     if results_map:
         times_np = times_all[0].numpy() if times_all is not None else None
-        plot_equity_curves(results_map, OUTPUT_DIR, times_np, periods_per_year=ppy)
-        export_equity_json(results_map, OUTPUT_DIR, times_np, periods_per_year=ppy)
+        plot_equity_curves(results_map, output_dir, times_np, periods_per_year=ppy)
+        export_equity_json(results_map, output_dir, times_np, periods_per_year=ppy)
 
     # ── 7. 资金曲线图已在步骤 6 生成；跳过 K 线/逐笔交易图以加快回测 ─────
 
@@ -768,8 +770,8 @@ def main():
                 "sortino": round(calc_sortino(port_kelly_pnl, ppy), 4),
             },
         }
-    rp = f"{OUTPUT_DIR}/multi_factor_report.json"
-    with open(rp, "w") as f:
+    rp = Path(output_dir) / "multi_factor_report.json"
+    with open(rp, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     print(f"\n  JSON 报告已保存 → {rp}")
     print("完成。\n")

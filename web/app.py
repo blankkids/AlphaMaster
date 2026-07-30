@@ -7,6 +7,7 @@ import sys
 import time
 import traceback
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -59,7 +60,7 @@ from web.strategy_file import (
 from web.training_manager import training_manager
 from web.training_time import get_training_time_summary
 from web.training_package import build_training_export_zip, import_training_package
-from web.backtest_manager import backtest_manager
+from web.backtest_manager import backtest_manager, resolve_backtest_run_dir
 from web.realtime_manager import (
     DEFAULT_REFRESH_SECONDS,
     MAX_REFRESH_SECONDS,
@@ -98,6 +99,14 @@ class LoginRequest(BaseModel):
 
 class DataFileRequest(BaseModel):
     data_file: str
+
+
+class DeleteDataFileRequest(BaseModel):
+    data_file: str
+
+
+class StrategyFileRequest(BaseModel):
+    strategy_file: str
 
 
 class ClientLogRequest(BaseModel):
@@ -295,7 +304,7 @@ def _list_historical_data_files() -> list[dict[str, Any]]:
         raw = str(path or "").strip()
         if not raw:
             return
-        key = raw.replace("\\", "/").lower()
+        key = _data_path_key(raw)
         if key in seen:
             return
         seen.add(key)
@@ -314,16 +323,17 @@ def _list_historical_data_files() -> list[dict[str, Any]]:
                 continue
             add(payload.get("data_file"))
 
-    if DATA_UPLOAD_DIR.exists():
+    data_dir = ROOT / "data"
+    if data_dir.exists():
         try:
-            uploads = sorted(
-                DATA_UPLOAD_DIR.rglob("*.parquet"),
+            local_files = sorted(
+                data_dir.rglob("*.parquet"),
                 key=lambda path: path.stat().st_mtime,
                 reverse=True,
             )
         except OSError:
-            uploads = []
-        for path in uploads:
+            local_files = []
+        for path in local_files:
             add(path)
 
     rows: list[dict[str, Any]] = []
@@ -344,9 +354,167 @@ def _list_historical_data_files() -> list[dict[str, Any]]:
                 "timeframe": timeframe,
                 "size_bytes": stat.st_size,
                 "modified_at": stat.st_mtime,
+                "delete_mode": "file",
             }
         )
     return rows
+
+
+def _data_path_key(path: str | Path | None) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    try:
+        raw = str(Path(raw).resolve())
+    except OSError:
+        pass
+    return raw.replace("\\", "/").lower()
+
+
+def _training_config_snapshot(
+    *,
+    mode: str = "ftmo",
+    from_scratch: bool = False,
+) -> dict[str, Any]:
+    return {
+        "train_steps": ModelConfig.TRAIN_STEPS,
+        "batch_size": ModelConfig.BATCH_SIZE,
+        "reward_mode": ModelConfig.REWARD_MODE,
+        "max_formula_len": ModelConfig.MAX_FORMULA_LEN,
+        "device": str(ModelConfig.DEVICE),
+        "mode": mode,
+        "from_scratch": bool(from_scratch),
+    }
+
+
+def _strategy_record(info: dict[str, Any] | None) -> dict[str, Any]:
+    if not info or not info.get("strategy_file"):
+        return {}
+    return {
+        "strategy_file": info["strategy_file"],
+        "best_score": info.get("best_score"),
+        "vocab_version": info.get("vocab_version"),
+        "formula_decoded": info.get("formula_decoded"),
+        "mode": info.get("mode"),
+    }
+
+
+def _upsert_training_record(
+    data_info: dict[str, Any],
+    *,
+    training_config: dict[str, Any] | None = None,
+    strategy_info: dict[str, Any] | None = None,
+    updated_at: str | None = None,
+) -> dict[str, Any]:
+    data_file = str(data_info.get("data_file") or "").strip()
+    if not data_file:
+        raise ValueError("训练记录缺少 data_file")
+    data_key = _data_path_key(data_file)
+    settings = load_settings()
+    records = list(settings.get("training_records") or [])
+    existing = next(
+        (
+            record
+            for record in records
+            if _data_path_key(record.get("data_file")) == data_key
+        ),
+        {},
+    )
+    record = {
+        **existing,
+        "data_file": str(Path(data_file).resolve()),
+        "symbol": str(data_info.get("symbol") or existing.get("symbol") or "").strip(),
+        "timeframe": str(
+            data_info.get("timeframe") or existing.get("timeframe") or ""
+        ).strip(),
+        "training_config": (
+            training_config
+            or existing.get("training_config")
+            or _training_config_snapshot()
+        ),
+        "strategy": (
+            _strategy_record(strategy_info)
+            if strategy_info
+            else existing.get("strategy") or {}
+        ),
+        "updated_at": (
+            updated_at
+            or existing.get("updated_at")
+            or datetime.now(timezone.utc).isoformat()
+        ),
+    }
+    next_records = [record] + [
+        item
+        for item in records
+        if _data_path_key(item.get("data_file")) != data_key
+    ]
+    if next_records != records:
+        save_settings({"training_records": next_records})
+    return record
+
+
+def _find_strategy_for_training_record(
+    symbol: str,
+    timeframe: str,
+    data_file: str,
+) -> dict[str, Any] | None:
+    for row in list_strategies():
+        if str(row.get("symbol") or "") != symbol:
+            continue
+        row_timeframe = str(row.get("timeframe") or "").upper()
+        if timeframe and row_timeframe and row_timeframe != timeframe.upper():
+            continue
+        strategy_file = str(row.get("strategy_file") or "").strip()
+        if not strategy_file:
+            continue
+        try:
+            return inspect_strategy_file(strategy_file, data_file_hint=data_file)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _backfill_training_records(rows: list[dict[str, Any]]) -> None:
+    settings = load_settings()
+    existing_keys = {
+        _data_path_key(record.get("data_file"))
+        for record in settings.get("training_records") or []
+    }
+    for row in rows:
+        data_key = _data_path_key(row.get("data_file"))
+        if not data_key or data_key in existing_keys:
+            continue
+        modified_at = row.get("modified_at")
+        try:
+            recorded_at = datetime.fromtimestamp(
+                float(modified_at),
+                tz=timezone.utc,
+            ).isoformat()
+        except (TypeError, ValueError, OSError):
+            recorded_at = datetime.now(timezone.utc).isoformat()
+        try:
+            strategy = _find_strategy_for_training_record(
+                str(row.get("symbol") or ""),
+                str(row.get("timeframe") or ""),
+                str(row.get("data_file") or ""),
+            )
+            _upsert_training_record(
+                row,
+                training_config=_training_config_snapshot(mode="ftmo"),
+                strategy_info=strategy,
+                updated_at=recorded_at,
+            )
+        except Exception as exc:
+            log_error("backfill training record failed", exc)
+            continue
+        existing_keys.add(data_key)
+
+
+def _active_job_uses_data_file(status: dict[str, Any], path: Path) -> bool:
+    if not status.get("active"):
+        return False
+    job = status.get("job") or {}
+    return _data_path_key(job.get("data_file")) == _data_path_key(path)
 
 
 def _browse_data_file() -> dict[str, Any]:
@@ -535,6 +703,16 @@ def _sync_and_persist_best_strategy(
     )
     if info:
         save_settings({"last_strategy_file": info["strategy_file"]})
+        if hint:
+            try:
+                data_info = inspect_parquet_file(hint)
+                _upsert_training_record(
+                    data_info,
+                    strategy_info=info,
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:
+                pass
     return info
 
 
@@ -715,7 +893,15 @@ def api_upload_data_file(file: UploadFile = File(...)) -> dict[str, Any]:
 
 @app.get("/api/data-files/history")
 def api_data_file_history() -> dict[str, Any]:
-    return {"data_files": _list_historical_data_files()}
+    rows = _list_historical_data_files()
+    _backfill_training_records(rows)
+    records = {
+        _data_path_key(record.get("data_file")): record
+        for record in load_settings().get("training_records") or []
+    }
+    for row in rows:
+        row["training_record"] = records.get(_data_path_key(row.get("data_file")))
+    return {"data_files": rows}
 
 
 @app.post("/api/data-file/select")
@@ -745,6 +931,68 @@ def api_upload_strategy_file(file: UploadFile = File(...)) -> dict[str, Any]:
         raise
     save_settings({"last_strategy_file": info["strategy_file"]})
     return {"ok": True, "uploaded": True, **info}
+
+
+@app.post("/api/strategy-file/select")
+def api_select_strategy_file(req: StrategyFileRequest) -> dict[str, Any]:
+    info = _inspect_strategy_or_http(req.strategy_file)
+    save_settings({"last_strategy_file": info["strategy_file"]})
+    return {"ok": True, **info}
+
+
+@app.post("/api/data-file/delete")
+def api_delete_data_file(req: DeleteDataFileRequest) -> dict[str, Any]:
+    requested_key = _data_path_key(req.data_file)
+    row = next(
+        (
+            item
+            for item in _list_historical_data_files()
+            if _data_path_key(item.get("data_file")) == requested_key
+        ),
+        None,
+    )
+    if row is None:
+        raise HTTPException(404, "历史数据不存在或已被移除")
+
+    path = Path(row["data_file"]).resolve()
+    if _active_job_uses_data_file(training_manager.status(), path):
+        raise HTTPException(409, "该数据正在用于模型训练，请先停止训练")
+    if _active_job_uses_data_file(backtest_manager.status(), path):
+        raise HTTPException(409, "该数据正在用于策略回测，请先停止回测")
+
+    settings = load_settings()
+    path_key = _data_path_key(path)
+    recent = [
+        value
+        for value in settings.get("recent_data_files") or []
+        if _data_path_key(value) != path_key
+    ]
+    training_records = [
+        record
+        for record in settings.get("training_records") or []
+        if _data_path_key(record.get("data_file")) != path_key
+    ]
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise HTTPException(409, f"无法删除数据文件: {exc}") from exc
+
+    changes: dict[str, Any] = {
+        "recent_data_files": recent,
+        "training_records": training_records,
+    }
+    if _data_path_key(settings.get("last_data_file")) == path_key:
+        changes["last_data_file"] = ""
+    save_settings(changes)
+    current = load_settings()
+    return {
+        "ok": True,
+        "data_file": str(path),
+        "file_deleted": True,
+        "history_removed": True,
+        "current_data_file": current.get("last_data_file") or None,
+        "message": "历史数据及源 Parquet 文件已删除",
+    }
 
 
 @app.post("/api/strategy-file/sync-best")
@@ -1034,6 +1282,17 @@ def api_training_start(req: StartTrainingRequest) -> dict[str, Any]:
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
+    try:
+        _upsert_training_record(
+            info,
+            training_config=_training_config_snapshot(
+                mode="ftmo",
+                from_scratch=bool(req.from_scratch),
+            ),
+            updated_at=job.started_at,
+        )
+    except Exception as exc:
+        log_error("persist training record failed", exc)
     if req.from_scratch:
         invalidate_checkpoint_cache()
     return {
@@ -1076,10 +1335,22 @@ _METRIC_KEYS = (
 )
 
 
-def _load_backtest_report() -> dict[str, Any] | None:
+def _resolve_backtest_output_dir(run_id: str | None = None) -> Path:
+    if not run_id or run_id == "legacy":
+        return BACKTEST_OUTPUT_DIR
+    try:
+        output_dir = resolve_backtest_run_dir(run_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not output_dir.exists():
+        raise HTTPException(404, "回测批次不存在")
+    return output_dir
+
+
+def _load_backtest_report(output_dir: Path = BACKTEST_OUTPUT_DIR) -> dict[str, Any] | None:
     import json
 
-    report_path = BACKTEST_OUTPUT_DIR / "multi_factor_report.json"
+    report_path = output_dir / "multi_factor_report.json"
     if not report_path.exists():
         return None
     try:
@@ -1088,10 +1359,19 @@ def _load_backtest_report() -> dict[str, Any] | None:
         return None
 
 
-def _backtest_focus_symbol(symbol: str | None = None) -> str | None:
+def _backtest_focus_symbol(
+    symbol: str | None = None,
+    output_dir: Path = BACKTEST_OUTPUT_DIR,
+) -> str | None:
     """Resolve the symbol used to filter backtest charts/report for the web UI."""
     if symbol:
         return symbol.strip() or None
+
+    report = _load_backtest_report(output_dir)
+    if output_dir != BACKTEST_OUTPUT_DIR and report:
+        keys = list((report.get("symbols") or {}).keys())
+        if len(keys) == 1:
+            return keys[0]
 
     job = backtest_manager.status().get("job") or {}
     if job.get("symbol"):
@@ -1101,7 +1381,7 @@ def _backtest_focus_symbol(symbol: str | None = None) -> str | None:
     if strat.get("symbol"):
         return str(strat["symbol"])
 
-    report = _load_backtest_report()
+    report = report or _load_backtest_report()
     if report:
         keys = list((report.get("symbols") or {}).keys())
         if len(keys) == 1:
@@ -1131,14 +1411,17 @@ def _filter_report_for_symbol(report: dict[str, Any], symbol: str) -> dict[str, 
     }
 
 
-def _list_backtest_charts(symbol: str | None = None) -> list[dict[str, str]]:
+def _list_backtest_charts(
+    symbol: str | None = None,
+    output_dir: Path = BACKTEST_OUTPUT_DIR,
+) -> list[dict[str, str]]:
     """列出回测输出目录下的图表；单品种模式只返回该品种相关文件。"""
-    if not BACKTEST_OUTPUT_DIR.exists():
+    if not output_dir.exists():
         return []
 
     if symbol:
         charts: list[dict[str, str]] = []
-        equity = BACKTEST_OUTPUT_DIR / "portfolio_equity.png"
+        equity = output_dir / "portfolio_equity.png"
         if equity.exists():
             charts.append(
                 {"name": equity.name, "label": f"{symbol} 资金曲线", "kind": "equity"}
@@ -1146,10 +1429,10 @@ def _list_backtest_charts(symbol: str | None = None) -> list[dict[str, str]]:
         return charts
 
     charts = []
-    portfolio = BACKTEST_OUTPUT_DIR / "portfolio_equity.png"
+    portfolio = output_dir / "portfolio_equity.png"
     if portfolio.exists():
         charts.append({"name": "portfolio_equity.png", "label": "组合资金曲线", "kind": "portfolio"})
-    for path in sorted(BACKTEST_OUTPUT_DIR.glob("equity_*.png")):
+    for path in sorted(output_dir.glob("equity_*.png")):
         sym = path.stem.replace("equity_", "", 1)
         charts.append({"name": path.name, "label": f"{sym} 资金曲线", "kind": "symbol"})
     return charts
@@ -1160,6 +1443,32 @@ def api_backtest_status() -> dict[str, Any]:
     status = backtest_manager.status()
     status["log_tail"] = backtest_manager.tail_log(200)
     return status
+
+
+@app.get("/api/backtest/runs")
+def api_backtest_runs(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+    runs = backtest_manager.list_runs(limit)
+    legacy_report_path = BACKTEST_OUTPUT_DIR / "multi_factor_report.json"
+    legacy_report = _load_backtest_report()
+    if legacy_report and legacy_report_path.exists():
+        symbols = list((legacy_report.get("symbols") or {}).keys())
+        modified_at = datetime.fromtimestamp(
+            legacy_report_path.stat().st_mtime,
+            tz=timezone.utc,
+        ).isoformat()
+        runs.append({
+            "run_id": "legacy",
+            "strategy_name": "旧版回测结果",
+            "strategy_file": "",
+            "symbol": symbols[0] if len(symbols) == 1 else "组合",
+            "timeframe": None,
+            "state": "completed",
+            "started_at": modified_at,
+            "finished_at": modified_at,
+            "output_dir": "backtest_output",
+            "available": True,
+        })
+    return {"runs": runs, "latest_run_id": runs[0]["run_id"] if runs else None}
 
 
 @app.post("/api/backtest/start")
@@ -1244,32 +1553,41 @@ def api_backtest_stop() -> dict[str, Any]:
 
 
 @app.get("/api/backtest/report")
-def api_backtest_report(symbol: str | None = None) -> dict[str, Any]:
-    report = _load_backtest_report()
-    focus = _backtest_focus_symbol(symbol)
+def api_backtest_report(
+    symbol: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    output_dir = _resolve_backtest_output_dir(run_id)
+    report = _load_backtest_report(output_dir)
+    focus = _backtest_focus_symbol(symbol, output_dir)
     if report and focus:
         report = _filter_report_for_symbol(report, focus)
     return {
         "available": report is not None,
         "report": report,
-        "charts": _list_backtest_charts(focus),
+        "charts": _list_backtest_charts(focus, output_dir),
         "focus_symbol": focus,
+        "run_id": run_id,
     }
 
 
 @app.get("/api/backtest/equity")
-def api_backtest_equity(symbol: str | None = None) -> dict[str, Any]:
+def api_backtest_equity(
+    symbol: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     """资金曲线原始数据（供前端渲染交互式 HTML 图表）。"""
     import json
 
-    path = BACKTEST_OUTPUT_DIR / "equity_curve.json"
-    focus = _backtest_focus_symbol(symbol)
+    output_dir = _resolve_backtest_output_dir(run_id)
+    path = output_dir / "equity_curve.json"
+    focus = _backtest_focus_symbol(symbol, output_dir)
     if not path.exists():
-        return {"available": False, "focus_symbol": focus, "data": None}
+        return {"available": False, "focus_symbol": focus, "run_id": run_id, "data": None}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {"available": False, "focus_symbol": focus, "data": None}
+        return {"available": False, "focus_symbol": focus, "run_id": run_id, "data": None}
 
     # 单品种模式：只保留聚焦品种，去掉无关序列
     if focus and isinstance(data.get("symbols"), dict) and focus in data["symbols"]:
@@ -1279,17 +1597,18 @@ def api_backtest_equity(symbol: str | None = None) -> dict[str, Any]:
         }
         data.pop("portfolio", None)
 
-    return {"available": True, "focus_symbol": focus, "data": data}
+    return {"available": True, "focus_symbol": focus, "run_id": run_id, "data": data}
 
 
 @app.get("/api/backtest/chart/{name}")
-def api_backtest_chart(name: str):
+def api_backtest_chart(name: str, run_id: str | None = None):
     # 防止路径穿越：仅允许输出目录内的 png 文件
     if "/" in name or "\\" in name or ".." in name or not name.lower().endswith(".png"):
         raise HTTPException(400, "非法文件名")
-    path = (BACKTEST_OUTPUT_DIR / name).resolve()
+    output_dir = _resolve_backtest_output_dir(run_id)
+    path = (output_dir / name).resolve()
     try:
-        path.relative_to(BACKTEST_OUTPUT_DIR.resolve())
+        path.relative_to(output_dir.resolve())
     except ValueError:
         raise HTTPException(400, "非法路径") from None
     if not path.exists():
