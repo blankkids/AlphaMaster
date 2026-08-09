@@ -28,8 +28,8 @@ from hypothesis import strategies as st
 
 from model_core.ops import _ts_rank, _ts_corr_10, _ts_mean, _ts_std, OPS_CONFIG
 
-# ── All 10 new temporal operators from OPS_CONFIG (indices 12–21) ─────────────
-_TS_OPS = OPS_CONFIG[12:]  # list of (name, fn, arity)
+# ── 时序算子：按名称过滤（避免随 OPS_CONFIG 扩展混入 arity>2 的算子如 IF_GT）──
+_TS_OPS = [t for t in OPS_CONFIG if t[0].startswith("TS_")]  # list of (name, fn, arity)
 
 # ── Strategies ────────────────────────────────────────────────────────────────
 

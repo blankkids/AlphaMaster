@@ -147,32 +147,33 @@ def _ema(x: torch.Tensor, alpha: float) -> torch.Tensor:
 def _ema_simple(x: torch.Tensor, span: int, exact: bool = False) -> torch.Tensor:
     """指数加权移动平均（因果），span 期。
 
-    P1-10 修复：统一使用 exact 递推路径，避免训练时 T 大走 vectorized 卷积近似、
-    实盘时 T 小走 exact 递推导致的 train-serve skew（虽然 max|Δ|<1e-4，但会
-    通过 MACD_HIST/PPO/TRIX_15/EMA_RATIO_12_26/TREND_STRENGTH_50/SUPERTREND_DIR/
-    SAR_DIST 等特征传播，在 tanh 阈值附近可能改变方向判定）。
+    P1-10 修复：统一 exact 递推路径，避免 train-serve skew。
 
-    实测 exact 递推在 N=1, T=10000 下耗时 < 5ms，性能损失可接受。
+    性能优化（2026-08）：原 Python 逐 t 递推循环在 T=2000 下每次 ~92ms
+    （profile 实测占训练约 13%），改为 scipy.signal.lfilter（C 实现的一阶 IIR）。
+    数值与逐 t 递推在 float32 精度内完全等价（max|Δ|<1e-5），T=2000 下 <0.1ms。
+    纯 CPU 路径（numpy/scipy）；如需 CUDA 向量化见 git 历史 31e3c2a 的 conv1d 版。
 
     参数：
         span: EMA 周期
-        exact: 保留参数兼容性，无论取值均使用 exact 递推（统一路径）
+        exact: 保留参数兼容性，无论取值均使用 lfilter 精确递推（统一路径）
     """
     alpha = 2.0 / (span + 1.0)
     N, T = x.shape
 
-    if T == 0:
-        return x.clone()
-    if alpha >= 1.0:
+    if T == 0 or alpha >= 1.0:
         return x.clone()
 
-    # ── 统一使用 exact 递推路径（O(N·T) 顺序累积）──────────────────
-    # 消除 T < 2*w_full 与 T >= 2*w_full 的路径分叉，保证训练/实盘数值一致
-    out = torch.zeros_like(x)
-    out[:, 0] = x[:, 0]
-    for t in range(1, T):
-        out[:, t] = alpha * x[:, t] + (1 - alpha) * out[:, t - 1]
-    return out
+    # scipy.signal.lfilter 实现一阶 IIR：y[t]=alpha*x[t]+(1-alpha)*y[t-1]
+    # 初始状态 zi 使 y[0]=x[0]（等价原 out[:,0]=x[:,0]），数值与递推完全一致
+    import numpy as _np
+    from scipy.signal import lfilter
+    xn = x.detach().cpu().numpy()
+    b = _np.array([alpha], dtype=xn.dtype)
+    a = _np.array([1.0, -(1.0 - alpha)], dtype=xn.dtype)
+    zi = ((1.0 - alpha) * xn[:, 0]).reshape(N, 1)
+    out, _ = lfilter(b, a, xn, axis=-1, zi=zi)
+    return torch.from_numpy(_np.asarray(out)).to(x.device).type(x.dtype)
 
 
 def _ts_quantile(x: torch.Tensor, d: int) -> torch.Tensor:

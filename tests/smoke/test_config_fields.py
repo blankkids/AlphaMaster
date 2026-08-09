@@ -45,9 +45,9 @@ def _is_mt5_feature_names_updated():
 
 
 class TestConfigInputDimSmoke:
-    def test_input_dim_equals_10(self):
-        """Config.INPUT_DIM must equal 20 (expanded from 10 to 20 features)."""
-        assert Config.INPUT_DIM == 20
+    def test_input_dim_equals_71(self):
+        """Config.INPUT_DIM must equal 71（TA-Lib 扩充后）."""
+        assert Config.INPUT_DIM == 71
 
 
 class TestFeatureNamesSmoke:

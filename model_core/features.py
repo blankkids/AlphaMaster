@@ -1360,6 +1360,70 @@ class MT5FeatureEngineer:
         zscore  = (ret20 - cs_mean) / cs_std             # [N, T]
         return cls._norm(cls._clean(zscore))
 
+    # ── TA-Lib 互补特征（扩充因子库，纯 torch 实现，2026-08）──────────────
+    # 选与现有 65 特征不重复的指标；均复用既有滚动工具，口径（因果/warm-up 填 0）一致。
+    @classmethod
+    def _c_cmo14(cls, raw: dict) -> torch.Tensor:
+        """Chande 动量振荡 CMO(14)=(sum_up-sum_down)/(sum_up+sum_down)，∈[-1,1]。
+
+        与 Wilder RSI14 公式不同（CMO 用净动量比），互补。bounded → clean+clamp。
+        """
+        close = raw["close"].float()
+        diff  = close - torch.cat([close[:, :1], close[:, :-1]], dim=1)
+        up    = torch.relu(diff)
+        dn    = torch.relu(-diff)
+        su    = cls._rolling_mean(up, 14)
+        sd    = cls._rolling_mean(dn, 14)
+        cmo   = (su - dn) / (su + sd + cls._EPS)
+        return cls._clean(torch.clamp(cmo, -1.0, 1.0))
+
+    @classmethod
+    def _c_natr14(cls, raw: dict) -> torch.Tensor:
+        """归一化 ATR(14)=ATR/close（跨品种可比的波动率）。"""
+        close = raw["close"].float(); high = raw["high"].float(); low = raw["low"].float()
+        atr   = cls._atr(close, high, low, 14)
+        natr  = atr / (close + cls._EPS)
+        return cls._norm(torch.log1p(cls._clean(natr.clamp(min=0))))
+
+    @classmethod
+    def _c_apo_12_26(cls, raw: dict) -> torch.Tensor:
+        """绝对价格振荡 APO=(EMA12-EMA26)/price（MACD 线归一化到价格）。"""
+        close = raw["close"].float(); eps = cls._EPS
+        e12   = cls._ema_simple(close, 12)
+        e26   = cls._ema_simple(close, 26)
+        apo   = (e12 - e26) / (close + eps)
+        return cls._norm(cls._clean(apo))
+
+    @classmethod
+    def _c_trima_ratio20(cls, raw: dict) -> torch.Tensor:
+        """三重平滑均线比率：close/TRIMA(20)-1，TRIMA=SMA(SMA(close,20),20)。"""
+        close = raw["close"].float(); eps = cls._EPS
+        sma   = cls._ma(close, 20)
+        trima = cls._ma(sma, 20)
+        return cls._norm(cls._clean(close / (trima + eps) - 1.0))
+
+    @classmethod
+    def _c_midprice_pos20(cls, raw: dict) -> torch.Tensor:
+        """midprice=(H+L)/2 的 20 期通道位置 ∈[0,1]。"""
+        close = raw["close"].float(); high = raw["high"].float(); low = raw["low"].float()
+        eps   = cls._EPS; w = 20
+        mid   = (high + low) / 2.0
+        pad   = torch.zeros(close.shape[0], w - 1, device=close.device, dtype=close.dtype)
+        maxm  = torch.cat([pad, mid], dim=1).unfold(1, w, 1).max(dim=-1).values
+        minm  = torch.cat([pad, mid], dim=1).unfold(1, w, 1).min(dim=-1).values
+        pos   = (close - minm) / (maxm - minm + eps)
+        return cls._clean(torch.clamp(pos, 0.0, 1.0))
+
+    @classmethod
+    def _c_stddev_z20(cls, raw: dict) -> torch.Tensor:
+        """收益滚动标准差的 z-score（波动率突变：当前波动 vs 其 60 期均值）。"""
+        close = raw["close"].float(); eps = cls._EPS
+        ret   = cls._clean(torch.log(close[:, 1:] / (close[:, :-1] + eps)))
+        ret   = torch.cat([torch.zeros_like(close[:, :1]), ret], dim=1)
+        sd    = cls._rolling_std(ret, 20)
+        ma_sd = cls._rolling_mean(sd, 60)
+        return cls._norm((sd - ma_sd) / (ma_sd + eps))
+
     # ── main ─────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -1463,6 +1527,13 @@ _FEATURE_DEFS = [
     # task 5.8 跨截面相对强弱补充 cross_sectional (63-64)
     ("CS_RANK_RET5",    "cross_sectional", _fe._c_cs_rank_ret5),
     ("CS_ZSCORE_RET20", "cross_sectional", _fe._c_cs_zscore_ret20),
+    # TA-Lib 互补特征 (65-70)：扩充因子库，纯 torch 实现，与现有指标不重复
+    ("CMO_14",          "momentum",     _fe._c_cmo14),
+    ("NATR_14",         "volatility",   _fe._c_natr14),
+    ("APO_12_26",       "momentum",     _fe._c_apo_12_26),
+    ("TRIMA_RATIO_20",  "trend",        _fe._c_trima_ratio20),
+    ("MIDPRICE_POS_20", "channel",      _fe._c_midprice_pos20),
+    ("STDDEV_Z_20",     "statistical",  _fe._c_stddev_z20),
 ]
 
 # ── 激活特征白名单（特征剪枝机制，2026-07-04）──────────────────────────

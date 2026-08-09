@@ -69,6 +69,7 @@ def test_security_bars_are_fetched_across_multiple_pages() -> None:
     api = _FakeTdxApi(_rows(2_000))
     source = TongdaxinSource()
     source._api = api
+    source.connect = lambda: None  # 跳过连接老化逻辑，保留预设 fake api
 
     bars = source.fetch_bars("600519", "5m", 1_500, drop_forming=False)
 
@@ -81,6 +82,7 @@ def test_index_pagination_uses_index_api() -> None:
     api = _FakeTdxApi(_rows(1_000))
     source = TongdaxinSource()
     source._api = api
+    source.connect = lambda: None  # 跳过连接老化逻辑，保留预设 fake api
 
     bars = source.fetch_bars("sh000001", "1d", 900, drop_forming=False)
 

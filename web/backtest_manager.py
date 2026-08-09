@@ -159,6 +159,7 @@ class BacktestManager:
         data_file: str | None = None,
         commission_pct: float = 0.02,
         slippage_pct: float = 0.01,
+        engine: str = "vectorized",
     ) -> BacktestJob:
         with self._lock:
             self._refresh_state()
@@ -196,6 +197,8 @@ class BacktestManager:
                 str(output_dir),
             ]
             cmd.extend(["--data-file", data_file])
+            if engine and engine != "vectorized":
+                cmd.extend(["--engine", engine])
 
             self._log_fp = open(log_path, "w", encoding="utf-8", buffering=1)
             env = os.environ.copy()

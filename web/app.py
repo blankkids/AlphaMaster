@@ -135,6 +135,7 @@ class StartBacktestRequest(BaseModel):
     strategy_file: str
     commission_pct: float | None = None
     slippage_pct: float | None = None
+    engine: str = "vectorized"  # vectorized（默认）| akquant（事件驱动验证 + 专业报告）
 
 
 class AddWatchRequest(BaseModel):
@@ -1534,12 +1535,14 @@ def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
 
     save_settings({"last_data_file": data_file})
 
+    engine = req.engine if req.engine in ("vectorized", "akquant") else "vectorized"
     try:
         job = backtest_manager.start(
             strategy_file=info["strategy_file"],
             data_file=data_file,
             commission_pct=commission,
             slippage_pct=slippage,
+            engine=engine,
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
@@ -1550,6 +1553,22 @@ def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
 def api_backtest_stop() -> dict[str, Any]:
     stopped = backtest_manager.stop()
     return {"ok": stopped, "backtest": backtest_manager.status()}
+
+
+@app.get("/api/backtest/akquant-report")
+def api_backtest_akquant_report(run_id: str, symbol: str | None = None):
+    """返回该回测批次的 akquant Plotly HTML 报告（仅 --engine akquant 产出）。"""
+    from fastapi.responses import HTMLResponse
+
+    output_dir = _resolve_backtest_output_dir(run_id)
+    candidates: list[Path] = []
+    if symbol:
+        candidates.append(output_dir / f"akquant_report_{symbol}.html")
+    candidates.extend(sorted(output_dir.glob("akquant_report_*.html")))
+    for path in candidates:
+        if path.exists():
+            return HTMLResponse(path.read_text(encoding="utf-8"))
+    raise HTTPException(404, "该回测批次无 akquant 报告（需用 --engine akquant 运行回测）")
 
 
 @app.get("/api/backtest/report")

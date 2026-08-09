@@ -43,6 +43,14 @@ python-dotenv>=1.0.0
 loguru>=0.7.0
 tqdm>=4.66.0
 
+# ===== akquant / akshare ecosystem (backtest engine + CN market data) =====
+# akquant: Rust 内核事件驱动回测框架,用作并行可选回测引擎与专业报告(不进入训练关键路径)
+# akshare: A股/期货/指数数据接口,作为新数据源接入 web/data_sources/
+akshare>=1.12.0
+akquant>=0.1.0
+polars>=0.20.0
+plotly>=5.20.0
+
 # ===== Tests / E2E tooling =====
 pytest>=7.0.0
 hypothesis>=6.0.0

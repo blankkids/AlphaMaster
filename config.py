@@ -123,7 +123,7 @@ class Config:
 
     # ── 模型参数（仅供参考，训练实际使用 model_core.config.ModelConfig）────
     # 训练参数的权威来源是 model_core/config.py，这里的值不生效
-    INPUT_DIM       = 20           # 特征数（与 MT5FeatureEngineer.INPUT_DIM 一致）
+    INPUT_DIM       = 71           # 特征数（与 MT5FeatureEngineer.INPUT_DIM 一致；TA-Lib 扩充后 65→71）
     BATCH_SIZE      = 128          # 参见 ModelConfig.BATCH_SIZE
     TRAIN_STEPS     = 300          # 参见 ModelConfig.TRAIN_STEPS
     MAX_FORMULA_LEN = 8            # 参见 ModelConfig.MAX_FORMULA_LEN

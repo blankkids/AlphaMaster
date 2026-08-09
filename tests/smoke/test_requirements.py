@@ -36,10 +36,10 @@ def test_streamlit_removed():
     )
 
 
-def test_plotly_removed():
-    """plotly must not be listed (Requirement 12.2)."""
-    assert not _pkg_present("plotly"), (
-        "plotly is still present in requirements.txt but must be removed."
+def test_plotly_present():
+    """plotly 现为合法依赖（akquant 可视化报告所需，2026-08 引入）。"""
+    assert _pkg_present("plotly"), (
+        "plotly 应存在于 requirements.txt（akquant 报告依赖）。"
     )
 
 

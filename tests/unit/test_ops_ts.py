@@ -34,10 +34,10 @@ def rand_input() -> torch.Tensor:
 
 # ── 1. OPS_CONFIG 长度验证 ───────────────────────────────────────────────────────
 class TestOpsConfigLength:
-    def test_ops_config_length_equals_22(self):
-        """OPS_CONFIG 共 28 个算子（原 12 基础 + 10 时序 + 6 趋势/动量）"""
-        assert len(OPS_CONFIG) == 28, (
-            f"OPS_CONFIG 长度应为 28，实际为 {len(OPS_CONFIG)}"
+    def test_ops_config_length_equals_62(self):
+        """OPS_CONFIG 共 62 个算子"""
+        assert len(OPS_CONFIG) == 62, (
+            f"OPS_CONFIG 长度应为 62，实际为 {len(OPS_CONFIG)}"
         )
 
     def test_new_ops_count_equals_10(self):

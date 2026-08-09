@@ -33,9 +33,10 @@ def test_record_and_summarize_session(isolated_training_time: Path) -> None:
     assert summary.history_total_seconds == 9000
     assert summary.session_seconds is None
 
+    # active 会话用当前时间作 started_at，session_seconds ≈ 0（不受 wall-clock 漂移影响）
     job = {
         "symbol": "XAUUSD",
-        "started_at": (end + timedelta(minutes=5)).isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
         "finished_at": None,
     }
     live = tt.get_training_time_summary("XAUUSD", job=job, active=True)

@@ -15,6 +15,12 @@ import torch
 
 from model_core.vm import StackVM
 from strategy_manager.signal import target_to_direction
+from backtest_viz.metrics import (
+    calmar_ratio,
+    conditional_value_at_risk,
+    max_drawdown as calc_max_drawdown,
+    value_at_risk,
+)
 
 _H1_PERIODS_PER_YEAR = 6240
 
@@ -57,6 +63,11 @@ class SymbolResult:
     max_drawdown: float          = 0.0
     avg_hold_bars:float          = 0.0
     profit_loss_ratio: float | None = None  # 盈亏比 = 平均盈利 / 平均亏损
+    calmar:            float          = 0.0   # 年化收益 / 最大回撤
+    var_95:            float          = 0.0   # 95% 单期 VaR(历史法,负值为损失)
+    var_99:            float          = 0.0   # 99% 单期 VaR
+    cvar_95:           float          = 0.0   # 95% CVaR / Expected Shortfall
+    cvar_99:           float          = 0.0   # 99% CVaR
 
 
 class BacktestEngine:
@@ -177,6 +188,14 @@ class BacktestEngine:
         )
         pl_ratio      = self._calc_profit_loss_ratio(trades)
 
+        # 回撤与风险指标(修复此前 max_drawdown 恒为 0 的问题)
+        mdd     = calc_max_drawdown(cum_pnl)
+        calmar  = calmar_ratio(total_return, mdd, self.periods_per_year, T)
+        var_95  = value_at_risk(pnl_np, 0.95)
+        var_99  = value_at_risk(pnl_np, 0.99)
+        cvar_95 = conditional_value_at_risk(pnl_np, 0.95)
+        cvar_99 = conditional_value_at_risk(pnl_np, 0.99)
+
         return SymbolResult(
             symbol       = symbol,
             times        = times_np,
@@ -195,9 +214,14 @@ class BacktestEngine:
             total_return = total_return,
             n_trades     = n_trades,
             win_rate     = win_rate,
-            max_drawdown = 0.0,
+            max_drawdown = mdd,
             avg_hold_bars= avg_hold,
             profit_loss_ratio = pl_ratio,
+            calmar       = calmar,
+            var_95       = var_95,
+            var_99       = var_99,
+            cvar_95      = cvar_95,
+            cvar_99      = cvar_99,
         )
 
     # ─────────────────────────────────────────────────────────────────────

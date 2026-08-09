@@ -196,12 +196,13 @@ def test_alphagpt_forward_any_length(seq_len):
     assert not torch.isnan(logits).any(), (
         f"logits contains NaN for seq_len={seq_len}"
     )
-    assert not torch.isnan(value).any(), (
-        f"value contains NaN for seq_len={seq_len}"
+    assert value is None, (
+        f"value 应为 None（P2-1 废弃 critic），实际 {type(value)}"
     )
-    assert not torch.isnan(task_probs).any(), (
-        f"task_probs contains NaN for seq_len={seq_len}"
-    )
+    if task_probs is not None:
+        assert not torch.isnan(task_probs).any(), (
+            f"task_probs contains NaN for seq_len={seq_len}"
+        )
 
 
 # ---------------------------------------------------------------------------

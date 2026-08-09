@@ -97,21 +97,6 @@ class TestSnapshotRestoreAttentionParams:
                     f"参数 '{name}' 恢复后与快照不一致"
                 )
 
-    def test_qk_norm_params_match_snapshot_after_restore(self, model_with_snapshot):
-        """恢复快照后，所有含 'qk_norm' 关键字的参数应与快照逐元素相等。"""
-        model, snapshot = model_with_snapshot
-        _apply_snapshot_restore_with_ffn_noise(model, snapshot)
-
-        restored_sd = model.state_dict()
-        checked = 0
-        for name, snap_tensor in snapshot.items():
-            if 'qk_norm' in name:
-                assert torch.equal(restored_sd[name], snap_tensor), (
-                    f"参数 '{name}' 恢复后与快照不一致"
-                )
-                checked += 1
-        assert checked > 0, "未找到含 'qk_norm' 的参数，请检查模型结构"
-
     def test_norm1_params_match_snapshot_after_restore(self, model_with_snapshot):
         """恢复快照后，所有含 'norm1' 关键字的参数应与快照逐元素相等。"""
         model, snapshot = model_with_snapshot

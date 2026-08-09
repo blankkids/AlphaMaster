@@ -45,13 +45,13 @@ def _make_raw_dict(N: int = 3, T: int = 50, seed: int = 42) -> dict:
 # ─── 1. 输出形状 ──────────────────────────────────────────────────────────────
 
 class TestComputeFeaturesShape:
-    """compute_features 输出形状应为 [N, 20, T]（扩展自10，需求 F1.1, F1.2）"""
+    """compute_features 输出形状应为 [N, 71, T]（需求 F1.1, F1.2）"""
 
     def test_output_shape_default(self):
         raw = _make_raw_dict(N=3, T=50)
         out = MT5FeatureEngineer.compute_features(raw)
-        assert out.shape == (3, 20, 50), (
-            f"Expected shape (3, 20, 50), got {tuple(out.shape)}"
+        assert out.shape == (3, 71, 50), (
+            f"Expected shape (3, 71, 50), got {tuple(out.shape)}"
         )
 
     def test_output_ndim(self):
@@ -59,11 +59,11 @@ class TestComputeFeaturesShape:
         out = MT5FeatureEngineer.compute_features(raw)
         assert out.ndim == 3
 
-    def test_feature_dim_equals_10(self):
-        """feature 维度固定为 20，对应 INPUT_DIM（需求 F1.7）"""
+    def test_feature_dim_equals_71(self):
+        """feature 维度 == 71，对应 INPUT_DIM（需求 F1.7）"""
         raw = _make_raw_dict(N=3, T=50)
         out = MT5FeatureEngineer.compute_features(raw)
-        assert out.shape[1] == 20
+        assert out.shape[1] == 71
 
     def test_time_dim_preserved(self):
         """T 维度应与输入完全一致（需求 F1.1）"""

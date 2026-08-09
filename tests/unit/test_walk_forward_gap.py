@@ -42,13 +42,21 @@ class TestNormalCase:
         folds = _build_walk_forward_folds(T=500, n_folds=5, gap=20)
         assert len(folds) == 4
 
-    def test_train_start_always_zero(self):
-        """所有折的 train_start 都为 0（扩展训练窗口）。"""
+    def test_train_start_rolling_window(self):
+        """rolling window 模式（P2-2 重写）：第 0 折 train_start=0，每折单调递增，
+        且训练窗口宽度（train_end - train_start）恒定。"""
         folds = _build_walk_forward_folds(T=500, n_folds=5, gap=20)
+        assert len(folds) >= 2
+        assert folds[0]["train_start"] == 0
+        widths = set()
+        prev_start = -1
         for i, fold in enumerate(folds):
-            assert fold["train_start"] == 0, (
-                f"折 {i}: train_start 应为 0，实际为 {fold['train_start']}"
+            assert fold["train_start"] > prev_start, (
+                f"折 {i}: train_start 应单调递增，实际 {fold['train_start']}"
             )
+            widths.add(fold["train_end"] - fold["train_start"])
+            prev_start = fold["train_start"]
+        assert len(widths) == 1, f"rolling window 训练宽度应恒定，实际 {widths}"
 
     def test_val_end_within_bounds(self):
         """所有折的 val_end <= T。"""

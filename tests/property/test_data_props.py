@@ -80,10 +80,13 @@ def test_property1_fetcher_returns_canonical_dataframe(symbol: str, timeframe: i
     mock_mt5.last_error.return_value = (0, "No error")
 
     with patch("data_pipeline.fetcher.mt5", mock_mt5), \
-         patch("data_pipeline.fetcher._MT5_AVAILABLE", True):
+         patch("data_pipeline.fetcher._MT5_AVAILABLE", True), \
+         patch("data_pipeline.kline_cache.KlineCache") as MockCache:
+        MockCache.return_value.get.return_value = None  # 缓存空 → 回退 MT5
 
         from data_pipeline.fetcher import MT5DataFetcher
         fetcher = MT5DataFetcher()
+        fetcher.connect()  # 设置 _mt5_initialized=True（fetcher 重写后必需）
         df = fetcher.fetch(symbol, timeframe, count=5)
 
     # ── Assertions ────────────────────────────────────────────────────────────

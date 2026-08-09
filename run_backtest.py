@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import Config
 from data_pipeline.parquet_manager import ParquetDataManager
 from backtest_viz import BacktestEngine
+from backtest_viz import metrics as bt_metrics
 from model_core.vocab import FORMULA_VOCAB, VOCAB_VERSION
 from model_core.vm import StackVM
 from model_core.features import MT5FeatureEngineer
@@ -474,6 +475,7 @@ def main():
     data_file_arg = None
     commission_pct = DEFAULT_COMMISSION_PCT
     slippage_pct = DEFAULT_SLIPPAGE_PCT
+    engine = "vectorized"
     for i, arg in enumerate(sys.argv):
         if arg == "--strategy-file" and i + 1 < len(sys.argv):
             strategy_file = sys.argv[i + 1]
@@ -485,7 +487,12 @@ def main():
             slippage_pct = float(sys.argv[i + 1])
         elif arg == "--output-dir" and i + 1 < len(sys.argv):
             output_dir = sys.argv[i + 1]
+        elif arg == "--engine" and i + 1 < len(sys.argv):
+            engine = sys.argv[i + 1]
 
+    if engine not in ("vectorized", "akquant"):
+        print(f"[ERROR] 未知 --engine: {engine}（支持 vectorized / akquant）")
+        sys.exit(1)
     if commission_pct < 0 or slippage_pct < 0:
         print("[ERROR] 手续费/滑点不能为负"); sys.exit(1)
     cost_rate_all = (commission_pct + slippage_pct) / 100.0
@@ -599,6 +606,21 @@ def main():
     # 每个时间步 t 的归一化参数只依赖 [t-w+1..t]，无 look-ahead
     feat = MT5FeatureEngineer.compute_features(raw_dict)  # [N, F, T]，因果安全
 
+    # ── 可选：akquant 事件驱动回测（并行引擎，不参与训练，仅独立验证/展示）──
+    if engine == "akquant":
+        from backtest_viz.akquant_engine import run_akquant_from_loaded
+        print(f"\n{'='*62}\n  akquant 事件驱动回测（独立验证）\n{'='*62}")
+        run_akquant_from_loaded(
+            symbol_formulas=symbol_formulas,
+            raw_dict=raw_dict,
+            feat=feat,
+            syms=syms,
+            cost_rates=cost_rates,
+            output_dir=output_dir,
+        )
+        print("\nakquant 回测完成。")
+        return
+
     results_map = {}
     backtest_results = []
 
@@ -635,6 +657,10 @@ def main():
             "avg_hold":     r.avg_hold_bars,
             "profit_loss_ratio": pl_ratio,
             "cost_rate":    cost_rate,
+            "max_drawdown": float(r.max_drawdown),
+            "calmar":       float(r.calmar),
+            "var_95":       float(r.var_95),
+            "cvar_95":      float(r.cvar_95),
         }
         results_map[sym]["kelly"] = build_kelly_backtest(r, engine, ppy)
 
@@ -726,6 +752,10 @@ def main():
             "total_return": round(d["total_return"], 6),
             "sharpe":       round(d["sharpe"], 4),
             "sortino":      round(d["sortino"], 4),
+            "max_drawdown": round(d["max_drawdown"], 6),
+            "calmar":       round(d["calmar"], 4),
+            "var_95":       round(d["var_95"], 6),
+            "cvar_95":      round(d["cvar_95"], 6),
             "n_trades":     d["n_trades"],
             "win_rate":     round(d["win_rate"], 4),
             "avg_hold_bars":round(d["avg_hold"], 2),
@@ -755,10 +785,20 @@ def main():
         )
         port_kelly_pnl = all_kelly_pnls.mean(axis=0)
         port_kelly_cum = np.cumsum(port_kelly_pnl)
+        port_mdd    = bt_metrics.max_drawdown(port_cum)
+        port_var95  = bt_metrics.value_at_risk(port_pnl, 0.95)
+        port_cvar95 = bt_metrics.conditional_value_at_risk(port_pnl, 0.95)
         report["portfolio"] = {
             "total_return": round(float(port_cum[-1]), 6),
             "sharpe":       round(p_sharpe, 4),
             "sortino":      round(p_sortino, 4),
+            "max_drawdown": round(port_mdd, 6),
+            "calmar":       round(
+                bt_metrics.calmar_ratio(float(port_cum[-1]), port_mdd, ppy, len(port_pnl)),
+                4,
+            ),
+            "var_95":       round(port_var95, 6),
+            "cvar_95":      round(port_cvar95, 6),
             "profit_loss_ratio": round(p_pl_ratio, 4) if p_pl_ratio is not None else None,
             "kelly": {
                 "average_fraction": round(

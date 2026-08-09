@@ -86,16 +86,16 @@ def test_compute_features_shape_and_nan_free(N: int, T: int):
     Property 1: compute_features Output Shape and NaN Safety Invariant
 
     For any N ∈ [1, 10] and T ∈ [21, 200] with positive OHLCV inputs,
-    compute_features must return a tensor of shape [N, 10, T] with no NaN/Inf.
+    compute_features must return a tensor of shape [N, 71, T] with no NaN/Inf.
 
     **Validates: Requirements F1.1, F1.2, F1.10**
     """
     raw_dict = _make_ohlcv(N, T)
     out = MT5FeatureEngineer.compute_features(raw_dict)
 
-    # Shape invariant: 20 features (expanded from 10)
-    assert out.shape == (N, 20, T), (
-        f"Expected shape ({N}, 20, {T}), got {tuple(out.shape)}"
+    # Shape invariant: 71 features（TA-Lib 扩充后）
+    assert out.shape == (N, 71, T), (
+        f"Expected shape ({N}, 71, {T}), got {tuple(out.shape)}"
     )
 
     # NaN safety

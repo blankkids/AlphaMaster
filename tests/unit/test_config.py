@@ -15,16 +15,16 @@ from config import Config
 
 
 class TestConfigInputDim:
-    def test_input_dim_equals_6(self):
-        assert Config.INPUT_DIM == 20   # expanded from 10 to 20 features
+    def test_input_dim_equals_71(self):
+        assert Config.INPUT_DIM == 71   # 特征数（TA-Lib 扩充后）
 
     def test_input_dim_is_int(self):
         assert isinstance(Config.INPUT_DIM, int)
 
 
 class TestConfigCostRate:
-    def test_cost_rate_equals_0001(self):
-        assert Config.COST_RATE == 0.0001
+    def test_cost_rate_equals_0003(self):
+        assert Config.COST_RATE == 0.0003
 
     def test_cost_rate_is_float(self):
         assert isinstance(Config.COST_RATE, float)
@@ -56,8 +56,8 @@ class TestConfigSymbols:
 
 
 class TestConfigDataParams:
-    def test_min_bars_equals_100(self):
-        assert Config.MIN_BARS == 3000   # updated for 5-symbol portfolio
+    def test_min_bars_equals_300(self):
+        assert Config.MIN_BARS == 300
 
     def test_bars_count_equals_2000(self):
         assert Config.BARS_COUNT >= 100   # 只断言合理下界，不固定具体值
